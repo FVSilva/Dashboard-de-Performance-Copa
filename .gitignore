@@ -2,3 +2,8 @@ node_modules/
 *.log
 .env
 .vercel
+.claude/
+*.json
+!package.json
+!package-lock.json
+!vercel.json
