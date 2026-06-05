@@ -1192,8 +1192,14 @@ function renderCalls() {
 function renderComparison() {
   const trends = dashData.trends;
   if (trends.length < 2) return;
-  const cur  = trends[trends.length-1];
-  const prev = trends[trends.length-2];
+
+  // Pula mês atual se incompleto
+  const now = new Date();
+  const curMonthKey = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  const complete = trends.filter(t => t.month !== curMonthKey);
+  const base = complete.length >= 2 ? complete : trends;
+  const cur  = base[base.length-1];
+  const prev = base[base.length-2];
 
   const metrics = [
     {label:'Ligações',   cur:cur.calls,        prev:prev.calls},

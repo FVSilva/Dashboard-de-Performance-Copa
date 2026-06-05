@@ -778,7 +778,8 @@ async function loadDashboard() {
 
   const { from, to } = getDateRange();
   const diffDays = Math.ceil((to - from) / (1000*60*60*24)) + 1;
-  const months   = Math.max(1, Math.ceil(diffDays / 30) + 1);
+  // Sempre busca pelo menos 3 meses para garantir 2 meses completos no Comparativo
+  const months   = Math.max(3, Math.ceil(diffDays / 30) + 1);
 
   try {
     const [dashRes, callsRes, inboundRes] = await Promise.all([
@@ -1401,8 +1402,14 @@ function renderInbound() {
 function renderComparison() {
   const trends = dashData.trends;
   if (trends.length < 2) return;
-  const cur = trends[trends.length-1];
-  const prev = trends[trends.length-2];
+
+  // Pula mês atual se incompleto (ainda estamos nele)
+  const now = new Date();
+  const curMonthKey = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  const complete = trends.filter(t => t.month !== curMonthKey);
+  const base = complete.length >= 2 ? complete : trends;
+  const cur  = base[base.length-1];
+  const prev = base[base.length-2];
 
   const metrics = [
     {label:'Ligações',cur:cur.calls,prev:prev.calls},
