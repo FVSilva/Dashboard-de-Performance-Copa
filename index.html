@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Dashboard SDR — Copa Energia</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
 <style>
   :root {
     --green: #1a4d3a;
@@ -537,6 +538,13 @@ const COLORS = [
 const MONTHS_PT = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
 const charts = {};
 
+Chart.register(ChartDataLabels);
+
+// Global datalabels defaults
+Chart.defaults.set('plugins.datalabels', {
+  display: false  // off by default; enable per chart
+});
+
 // ─── HELPERS ──────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -560,6 +568,71 @@ function renderChart(id, config) {
   if (charts[id]) charts[id].destroy();
   const ctx = document.getElementById(id);
   if (!ctx) return;
+
+  const type = config.type;
+  const isStacked = config.options?.scales?.x?.stacked || config.options?.scales?.y?.stacked;
+  const isHorizontal = config.options?.indexAxis === 'y';
+  const isPie = type === 'pie' || type === 'doughnut';
+  const isLine = type === 'line';
+
+  // Inject datalabels plugin config into each dataset that doesn't already have one
+  if (config.data?.datasets) {
+    config.data.datasets.forEach(ds => {
+      if (ds.datalabels !== undefined) return; // already set, skip
+
+      if (isPie) {
+        ds.datalabels = {
+          display: true,
+          color: '#fff',
+          font: { weight: 'bold', size: 11 },
+          formatter: (val, ctx) => {
+            const total = ctx.dataset.data.reduce((a, b) => a + (b || 0), 0);
+            if (!total || val === 0) return '';
+            const pct = ((val / total) * 100).toFixed(1);
+            return pct < 5 ? '' : pct + '%';
+          }
+        };
+      } else if (isLine) {
+        ds.datalabels = {
+          display: true,
+          align: 'top',
+          anchor: 'end',
+          color: ds.borderColor || '#1a4d3a',
+          font: { size: 10, weight: '600' },
+          formatter: val => val > 0 ? val.toLocaleString('pt-BR') : ''
+        };
+      } else if (isStacked) {
+        ds.datalabels = {
+          display: (ctx) => (ctx.dataset.data[ctx.dataIndex] || 0) > 0,
+          anchor: 'center',
+          align: 'center',
+          color: '#fff',
+          font: { size: 10, weight: '600' },
+          formatter: val => val > 0 ? val.toLocaleString('pt-BR') : ''
+        };
+      } else if (isHorizontal) {
+        ds.datalabels = {
+          display: true,
+          anchor: 'end',
+          align: 'end',
+          color: '#1a4d3a',
+          font: { size: 11, weight: '700' },
+          formatter: val => val > 0 ? val.toLocaleString('pt-BR') : ''
+        };
+      } else {
+        // vertical bar
+        ds.datalabels = {
+          display: true,
+          anchor: 'end',
+          align: 'top',
+          color: '#1a2e25',
+          font: { size: 10, weight: '600' },
+          formatter: val => val > 0 ? val.toLocaleString('pt-BR') : ''
+        };
+      }
+    });
+  }
+
   charts[id] = new Chart(ctx, config);
 }
 
