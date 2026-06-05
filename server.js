@@ -42,9 +42,52 @@ async function fetchAll(endpoint, extraParams = {}, maxRecords = 1000) {
     results.push(...(data.data || []));
     if (!data.next || results.length >= data.totalItems || results.length >= maxRecords) break;
     start += limit;
-    await sleep(150); // 150ms between pages to avoid rate limiting
+    await sleep(150);
   }
   return results;
+}
+
+// Fetch the MOST RECENT records — API returns oldest-first so we jump to the end
+async function fetchRecent(endpoint, extraParams = {}, maxRecords = 500) {
+  // Peek to get totalItems
+  let peek;
+  try {
+    peek = await meetime.get(endpoint, { params: { limit: 1, start: 0, ...extraParams } });
+  } catch (e) { return []; }
+  const total = peek.data.totalItems || 0;
+  if (!total) return [];
+  const startOffset = Math.max(0, total - maxRecords);
+  return fetchAllFrom(endpoint, extraParams, startOffset, maxRecords);
+}
+
+async function fetchAllFrom(endpoint, extraParams = {}, startOffset = 0, maxRecords = 500) {
+  const results = [];
+  let start = startOffset;
+  const limit = 100;
+  while (results.length < maxRecords) {
+    let retries = 3;
+    let resp;
+    while (retries > 0) {
+      try {
+        resp = await meetime.get(endpoint, { params: { limit, start, ...extraParams } });
+        break;
+      } catch (e) {
+        if (e.response && e.response.status === 429) {
+          await sleep(2000);
+          retries--;
+        } else throw e;
+      }
+    }
+    if (!resp) break;
+    const data = resp.data;
+    const page = data.data || [];
+    if (!page.length) break;
+    results.push(...page);
+    if (!data.next || results.length >= maxRecords) break;
+    start += limit;
+    await sleep(150);
+  }
+  return results.slice(0, maxRecords);
 }
 
 // Cache in memory (refresh every 15min)
@@ -180,7 +223,7 @@ app.get('/api/dashboard', async (req, res) => {
         allProspections.push(...prosp.map(p => ({ ...p, sdr_id: sdr.id, sdr_name: sdr.name || sdr.email })));
       } catch (e) { console.error(`prosp fetch FAILED for ${sdr.id}:`, e.message); }
       try {
-        const acts = await cached(`acts_${sdr.id}`, () => fetchAll('/prospections/activities', { assigned_to_id: sdr.id }, 500));
+        const acts = await cached(`acts_${sdr.id}`, () => fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 500));
         allActivities.push(...acts.map(a => ({ ...a, sdr_id: sdr.id, sdr_name: sdr.name || sdr.email })));
       } catch (e) { console.error(`acts fetch failed for ${sdr.id}:`, e.message); }
     }
@@ -283,7 +326,7 @@ app.get('/api/inbound', async (req, res) => {
         allProsp.push(...prosp.map(p => ({ ...p, _sdr_id: sdr.id, _sdr_name: sdr.name || sdr.email, _team: sdr.team_name })));
       } catch (e) { console.error(`inbound prosp ${sdr.id}:`, e.message); }
       try {
-        const acts = await cached(`acts_${sdr.id}`, () => fetchAll('/prospections/activities', { assigned_to_id: sdr.id }, 500));
+        const acts = await cached(`acts_${sdr.id}`, () => fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 500));
         allActs.push(...acts.map(a => ({ ...a, _sdr_id: sdr.id, _sdr_name: sdr.name || sdr.email, _team: sdr.team_name })));
       } catch (e) { console.error(`inbound acts ${sdr.id}:`, e.message); }
     }
@@ -415,7 +458,7 @@ app.listen(PORT, () => {
           cache[`prosp_${sdr.id}`] = prosp; cacheTime[`prosp_${sdr.id}`] = Date.now();
         } catch (_) {}
         try {
-          const acts = await fetchAll('/prospections/activities', { assigned_to_id: sdr.id }, 500);
+          const acts = await fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 500);
           cache[`acts_${sdr.id}`] = acts; cacheTime[`acts_${sdr.id}`] = Date.now();
         } catch (_) {}
       }
