@@ -362,11 +362,11 @@
     <input type="date" id="filter-date-to"/>
   </div>
   <div class="filter-group" style="gap:4px">
-    <button class="btn-quick" onclick="setQuick(1)">Hoje</button>
-    <button class="btn-quick" onclick="setQuick(7)">7d</button>
-    <button class="btn-quick" onclick="setQuick(30)">30d</button>
-    <button class="btn-quick" onclick="setQuick(90)">90d</button>
-    <button class="btn-quick" onclick="setQuick(180)">6m</button>
+    <button class="btn-quick" onclick="setQuick(1, this)">Hoje</button>
+    <button class="btn-quick" onclick="setQuick(7, this)">7d</button>
+    <button class="btn-quick" onclick="setQuick(30, this)">30d</button>
+    <button class="btn-quick" onclick="setQuick(90, this)">90d</button>
+    <button class="btn-quick" onclick="setQuick(180, this)">6m</button>
   </div>
   <div class="filter-sep"></div>
   <div class="filter-group">
@@ -598,7 +598,7 @@
         <div class="chart-wrap tall"><canvas id="chart-comparison"></canvas></div>
       </div>
       <div class="chart-card">
-        <h3><span>👤</span> Evolução Individual por SDR</h3>
+        <h3><span>👤</span> Conectadas por SDR — Período Atual</h3>
         <div class="chart-wrap tall"><canvas id="chart-sdr-evolution"></canvas></div>
       </div>
     </div>
@@ -637,14 +637,14 @@ let sortDir = -1;
 function toDateStr(d) {
   return d.toISOString().slice(0,10);
 }
-function setQuick(days) {
-  const to = new Date();
-  const from = new Date();
+function setQuick(days, btn) {
+  const to = new Date(), from = new Date();
   from.setDate(from.getDate() - (days - 1));
   document.getElementById('filter-date-from').value = toDateStr(from);
   document.getElementById('filter-date-to').value   = toDateStr(to);
   document.querySelectorAll('.btn-quick').forEach(b => b.classList.remove('active'));
-  event.target.classList.add('active');
+  if (btn) btn.classList.add('active');
+  loadDashboard();
 }
 function getDateRange() {
   const fromVal = document.getElementById('filter-date-from').value;
@@ -772,8 +772,6 @@ function renderChart(id, config) {
   charts[id] = new Chart(ctx, config);
 }
 
-let inboundData = null;
-
 async function loadDashboard() {
   document.getElementById('loading').style.display = 'flex';
   document.getElementById('loading-sub').textContent = 'Buscando métricas consolidadas...';
@@ -836,7 +834,8 @@ function populateFilters() {
   const teamSel = document.getElementById('filter-team');
   sdrSel.innerHTML = '<option value="all">Todos os SDRs</option>';
   const teams = new Set();
-  dashData.sdrs.forEach(s => {
+  const allForFilter = [...dashData.sdrs, ...(inboundData?.sdrs || [])];
+  allForFilter.forEach(s => {
     sdrSel.innerHTML += `<option value="${s.id}">${s.name||s.id}</option>`;
     if (s.team) teams.add(s.team);
   });
@@ -844,7 +843,7 @@ function populateFilters() {
   teams.forEach(t => { teamSel.innerHTML += `<option value="${t}">${t}</option>`; });
 }
 
-function applyFilters() { renderAll(); }
+function applyFilters() { loadDashboard(); }
 
 function renderAll() {
   renderOverview();
@@ -1251,7 +1250,7 @@ function renderCalls() {
 
 /* ===================== INBOUND ===================== */
 function renderInbound() {
-  if (!inboundData || !inboundData.sdrs || !inboundData.sdrs.length) return;
+  if (!inboundData || !Array.isArray(inboundData.sdrs) || !inboundData.sdrs.length) return;
   const sdrs = inboundData.sdrs;
 
   const totCalls   = sdrs.reduce((s,r)=>s+r.calls.total,0);
@@ -1443,8 +1442,7 @@ function renderComparison() {
     data:{
       labels:sdrs.map(s=>s.name||s.id),
       datasets:[
-        {label:'Conectadas Mês Ant.',data:sdrs.map(s=>Math.round(s.calls.connected*0.85)),backgroundColor:'rgba(107,138,122,0.5)',borderRadius:4},
-        {label:'Conectadas Mês Atual',data:sdrs.map(s=>s.calls.connected),backgroundColor:'rgba(245,166,35,0.8)',borderRadius:4}
+        {label:'Conectadas (período)',data:sdrs.map(s=>s.calls.connected), backgroundColor:sdrs.map((_,i)=>COLORS[i%COLORS.length]), borderRadius:4}
       ]
     },
     options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom'}},
@@ -1503,7 +1501,7 @@ function renderTrends() {
         label:s.name||s.id,
         data:trends.map(t => {
           // approximate per-sdr by equal distribution (real data would need per-user monthly breakdown)
-          return Math.round((t.calls/Math.max(dashData.sdrs.length,1))*(0.7+Math.random()*0.6));
+          return Math.round(t.calls / Math.max(dashData.sdrs.length, 1));
         }),
         backgroundColor:COLORS[i%COLORS.length]+'cc',
         borderRadius:2

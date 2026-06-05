@@ -261,11 +261,11 @@
     <input type="date" id="filter-date-to"/>
   </div>
   <div class="filter-group" style="gap:4px">
-    <button class="btn-quick" onclick="setQuick(1)">Hoje</button>
-    <button class="btn-quick" onclick="setQuick(7)">7d</button>
-    <button class="btn-quick" onclick="setQuick(30)">30d</button>
-    <button class="btn-quick" onclick="setQuick(90)">90d</button>
-    <button class="btn-quick" onclick="setQuick(180)">6m</button>
+    <button class="btn-quick" onclick="setQuick(1, this)">Hoje</button>
+    <button class="btn-quick" onclick="setQuick(7, this)">7d</button>
+    <button class="btn-quick" onclick="setQuick(30, this)">30d</button>
+    <button class="btn-quick" onclick="setQuick(90, this)">90d</button>
+    <button class="btn-quick" onclick="setQuick(180, this)">6m</button>
   </div>
   <div class="filter-sep"></div>
   <div class="filter-group">
@@ -467,7 +467,7 @@
         <div class="chart-wrap tall"><canvas id="chart-comparison"></canvas></div>
       </div>
       <div class="chart-card">
-        <h3><span>👤</span> Conectadas por SDR — Comparativo</h3>
+        <h3><span>👤</span> Conectadas por SDR — Período Atual</h3>
         <div class="chart-wrap tall"><canvas id="chart-sdr-evolution"></canvas></div>
       </div>
     </div>
@@ -500,20 +500,21 @@ const BASE_URL = 'https://api.meetime.com.br/v2';
 
 // ─── STATE ────────────────────────────────────────────────
 let dashData = null;
+let inboundData = null;
 let sortCol  = 'calls.connected';
 let sortDir  = -1;
 let selectedFunnelSDR = null;
 
 // ─── DATE HELPERS ─────────────────────────────────────────
 function toDateStr(d) { return d.toISOString().slice(0,10); }
-function setQuick(days) {
+function setQuick(days, btn) {
   const to = new Date(), from = new Date();
   from.setDate(from.getDate() - (days - 1));
   document.getElementById('filter-date-from').value = toDateStr(from);
   document.getElementById('filter-date-to').value   = toDateStr(to);
   document.querySelectorAll('.btn-quick').forEach(b => b.classList.remove('active'));
-  event.target.classList.add('active');
-  applyFilters();
+  if (btn) btn.classList.add('active');
+  loadDashboard();
 }
 function getDateRange() {
   const fv = document.getElementById('filter-date-from').value;
@@ -849,7 +850,8 @@ function populateFilters() {
   const teamSel = document.getElementById('filter-team');
   sdrSel.innerHTML = '<option value="all">Todos os SDRs</option>';
   const teams = new Set();
-  dashData.sdrs.forEach(s => {
+  const allForFilter = [...dashData.sdrs, ...(inboundData?.sdrs || [])];
+  allForFilter.forEach(s => {
     sdrSel.innerHTML += `<option value="${s.id}">${s.name||s.id}</option>`;
     if (s.team) teams.add(s.team);
   });
@@ -866,7 +868,7 @@ function getFilteredSDRs() {
   return sdrs;
 }
 
-function applyFilters() { renderAll(); }
+function applyFilters() { loadDashboard(); }
 
 function renderAll() {
   renderInbound();
@@ -1223,8 +1225,7 @@ function renderComparison() {
   renderChart('chart-sdr-evolution', {
     type:'bar',
     data:{labels:sdrs.map(s=>s.name||s.id),datasets:[
-      {label:'Conectadas Mês Ant.', data:sdrs.map(s=>Math.round(s.calls.connected*0.85)),backgroundColor:'rgba(107,138,122,0.5)',borderRadius:4},
-      {label:'Conectadas Mês Atual',data:sdrs.map(s=>s.calls.connected),                backgroundColor:'rgba(245,166,35,0.8)', borderRadius:4}
+      {label:'Conectadas (período)',data:sdrs.map(s=>s.calls.connected), backgroundColor:sdrs.map((_,i)=>COLORS[i%COLORS.length]), borderRadius:4}
     ]},
     options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom'}},scales:{x:{ticks:{font:{size:10}}},y:{grid:{color:'rgba(0,0,0,0.04)'}}}}
   });
@@ -1270,7 +1271,7 @@ function renderTrends() {
     type:'bar',
     data:{labels,datasets:sdrs.map((s,i)=>({
       label:s.name||s.id,
-      data:trends.map(t=>Math.round((t.calls/Math.max(dashData.sdrs.length,1))*(0.7+Math.random()*0.6))),
+      data:trends.map(t => Math.round(t.calls / Math.max(dashData.sdrs.length, 1))),
       backgroundColor:COLORS[i%COLORS.length]+'cc',borderRadius:2
     }))},
     options:{responsive:true,maintainAspectRatio:false,

@@ -245,7 +245,7 @@ app.get('/api/dashboard', async (req, res) => {
     }
 
     // Monthly trends (last 6 months)
-    const trends = buildMonthlyTrends(filteredCalls, filteredProsp, filteredActs);
+    const trends = buildMonthlyTrends(filteredCalls, filteredProsp, filteredActs, parseInt(months));
 
     res.json({ sdrs: Object.values(sdrMetrics), trends, totalSDRs: sdrs.length });
   } catch (e) {
@@ -345,7 +345,7 @@ app.get('/api/inbound', async (req, res) => {
       };
     }
 
-    const trends = buildMonthlyTrends(fCalls, fProsp, fActs);
+    const trends = buildMonthlyTrends(fCalls, fProsp, fActs, parseInt(months));
     res.json({ sdrs: Object.values(sdrMetrics), trends, teams: [...new Set(inboundSDRs.map(s => s.team_name).filter(Boolean))] });
   } catch (e) {
     console.error(e);
@@ -353,10 +353,10 @@ app.get('/api/inbound', async (req, res) => {
   }
 });
 
-function buildMonthlyTrends(calls, prosp, acts) {
+function buildMonthlyTrends(calls, prosp, acts, numMonths = 6) {
   const months = {};
   const now = new Date();
-  for (let i = 5; i >= 0; i--) {
+  for (let i = numMonths - 1; i >= 0; i--) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     months[key] = { month: key, calls: 0, connected: 0, meaningful: 0, conversions: 0, prospections: 0, emails: 0, social: 0 };
