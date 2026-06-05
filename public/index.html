@@ -62,18 +62,26 @@
   }
   select:focus, input:focus { border-color: var(--green); }
   .btn-apply {
-    background: var(--green);
-    color: #fff;
-    border: none;
-    border-radius: 6px;
-    padding: 8px 20px;
-    font-size:13px;
-    font-weight:600;
-    cursor:pointer;
-    transition: background 0.2s;
+    background: var(--green); color: #fff; border: none;
+    border-radius: 6px; padding: 8px 20px; font-size:13px; font-weight:600;
+    cursor:pointer; transition: background 0.2s;
   }
   .btn-apply:hover { background: var(--green-light); }
+  .btn-quick {
+    background: var(--bg); color: var(--muted); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; font-size:12px; font-weight:600;
+    cursor:pointer; transition: all 0.15s;
+  }
+  .btn-quick:hover, .btn-quick.active { background: var(--green); color:#fff; border-color:var(--green); }
+  .filter-sep { width:1px; height:32px; background:var(--border); margin:0 4px; }
   .refresh-badge { margin-left:auto; font-size:12px; color:var(--muted); }
+
+  input[type=date] {
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 7px 10px; font-size:13px; color: var(--text);
+    background: var(--bg); outline:none; cursor:pointer;
+  }
+  input[type=date]:focus { border-color: var(--green); }
 
   /* MAIN CONTENT */
   main { padding: 24px 32px; max-width: 1600px; margin:0 auto; }
@@ -345,15 +353,21 @@
 
 <div class="filters-bar">
   <div class="filter-group">
-    <label>Período</label>
-    <select id="filter-months">
-      <option value="1">Último mês</option>
-      <option value="2">Últimos 2 meses</option>
-      <option value="3" selected>Últimos 3 meses</option>
-      <option value="6">Últimos 6 meses</option>
-      <option value="12">Último ano</option>
-    </select>
+    <label>De</label>
+    <input type="date" id="filter-date-from"/>
   </div>
+  <div class="filter-group">
+    <label>Até</label>
+    <input type="date" id="filter-date-to"/>
+  </div>
+  <div class="filter-group" style="gap:4px">
+    <button class="btn-quick" onclick="setQuick(1)">Hoje</button>
+    <button class="btn-quick" onclick="setQuick(7)">7d</button>
+    <button class="btn-quick" onclick="setQuick(30)">30d</button>
+    <button class="btn-quick" onclick="setQuick(90)">90d</button>
+    <button class="btn-quick" onclick="setQuick(180)">6m</button>
+  </div>
+  <div class="filter-sep"></div>
   <div class="filter-group">
     <label>SDR</label>
     <select id="filter-sdr">
@@ -366,7 +380,7 @@
       <option value="all">Todos os times</option>
     </select>
   </div>
-  <button class="btn-apply" onclick="applyFilters()">Aplicar Filtros</button>
+  <button class="btn-apply" onclick="applyFilters()">Aplicar</button>
   <div class="refresh-badge" id="refresh-badge">—</div>
 </div>
 
@@ -613,9 +627,37 @@
 const API = '';
 let dashData = null;
 let allCallsData = [];
+let inboundData = null;
 let currentTab = 'overview';
 let sortCol = 'calls.connected';
 let sortDir = -1;
+
+// ── Date helpers ──────────────────────────────────────────
+function toDateStr(d) {
+  return d.toISOString().slice(0,10);
+}
+function setQuick(days) {
+  const to = new Date();
+  const from = new Date();
+  from.setDate(from.getDate() - (days - 1));
+  document.getElementById('filter-date-from').value = toDateStr(from);
+  document.getElementById('filter-date-to').value   = toDateStr(to);
+  document.querySelectorAll('.btn-quick').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+}
+function getDateRange() {
+  const fromVal = document.getElementById('filter-date-from').value;
+  const toVal   = document.getElementById('filter-date-to').value;
+  const from = fromVal ? new Date(fromVal + 'T00:00:00') : (() => { const d=new Date(); d.setMonth(d.getMonth()-3); return d; })();
+  const to   = toVal   ? new Date(toVal   + 'T23:59:59') : new Date();
+  return { from, to };
+}
+function initDates() {
+  const to   = new Date();
+  const from = new Date(); from.setMonth(from.getMonth() - 3);
+  document.getElementById('filter-date-from').value = toDateStr(from);
+  document.getElementById('filter-date-to').value   = toDateStr(to);
+}
 
 // Color palette
 const COLORS = [
@@ -659,9 +701,12 @@ function renderChart(id, config) {
 let inboundData = null;
 
 async function loadDashboard() {
-  const months = document.getElementById('filter-months').value;
   document.getElementById('loading').style.display = 'flex';
   document.getElementById('loading-sub').textContent = 'Buscando métricas consolidadas...';
+
+  const { from, to } = getDateRange();
+  const diffDays = Math.ceil((to - from) / (1000*60*60*24)) + 1;
+  const months   = Math.max(1, Math.ceil(diffDays / 30) + 1);
 
   try {
     const [dashRes, callsRes, inboundRes] = await Promise.all([
@@ -669,7 +714,7 @@ async function loadDashboard() {
       fetch(`/api/calls?months=${months}`),
       fetch(`/api/inbound?months=${months}`)
     ]);
-    dashData    = await dashRes.json();
+    dashData     = await dashRes.json();
     allCallsData = await callsRes.json();
     inboundData = await inboundRes.json();
 
@@ -689,23 +734,24 @@ async function loadDashboard() {
 
 function getFilteredSDRs() {
   let sdrs = dashData.sdrs;
-  const sdrFilter = document.getElementById('filter-sdr').value;
-  const teamFilter = document.getElementById('filter-team').value;
-  if (sdrFilter !== 'all') sdrs = sdrs.filter(s => s.id === sdrFilter);
-  if (teamFilter !== 'all') sdrs = sdrs.filter(s => s.team === teamFilter);
+  const sf = document.getElementById('filter-sdr').value;
+  const tf = document.getElementById('filter-team').value;
+  if (sf !== 'all') sdrs = sdrs.filter(s => s.id === sf);
+  if (tf !== 'all') sdrs = sdrs.filter(s => s.team === tf);
   return sdrs;
 }
 
 function getFilteredCalls() {
-  let calls = allCallsData;
-  const sdrFilter = document.getElementById('filter-sdr').value;
-  const teamFilter = document.getElementById('filter-team').value;
-  if (sdrFilter !== 'all') {
-    const ids = dashData.sdrs.filter(s=>s.id===sdrFilter).map(s=>s.id);
-    calls = calls.filter(c => ids.includes(c.user_id));
-  }
-  if (teamFilter !== 'all') {
-    const ids = dashData.sdrs.filter(s=>s.team===teamFilter).map(s=>s.id);
+  const { from, to } = getDateRange();
+  let calls = allCallsData.filter(c => {
+    const d = new Date(c.date);
+    return d >= from && d <= to;
+  });
+  const sf = document.getElementById('filter-sdr').value;
+  const tf = document.getElementById('filter-team').value;
+  if (sf !== 'all') calls = calls.filter(c => c.user_id === sf);
+  if (tf !== 'all') {
+    const ids = dashData.sdrs.filter(s=>s.team===tf).map(s=>s.id);
     calls = calls.filter(c => ids.includes(c.user_id));
   }
   return calls;
@@ -1406,6 +1452,7 @@ function showTab(tab) {
 }
 
 // Init
+initDates();
 loadDashboard();
 </script>
 </body>

@@ -55,7 +55,20 @@
     cursor:pointer; transition: background 0.2s;
   }
   .btn-apply:hover { background: var(--green-light); }
+  .btn-quick {
+    background: var(--bg); color: var(--muted); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; font-size:12px; font-weight:600;
+    cursor:pointer; transition: all 0.15s;
+  }
+  .btn-quick:hover, .btn-quick.active { background: var(--green); color:#fff; border-color:var(--green); }
+  .filter-sep { width:1px; height:32px; background:var(--border); margin:0 4px; }
   .refresh-badge { margin-left:auto; font-size:12px; color:var(--muted); }
+  input[type=date] {
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 7px 10px; font-size:13px; color: var(--text);
+    background: var(--bg); outline:none; cursor:pointer;
+  }
+  input[type=date]:focus { border-color: var(--green); }
 
   main { padding: 24px 32px; max-width: 1600px; margin:0 auto; }
 
@@ -239,15 +252,21 @@
 
 <div class="filters-bar">
   <div class="filter-group">
-    <label>Período</label>
-    <select id="filter-months">
-      <option value="1">Último mês</option>
-      <option value="2">Últimos 2 meses</option>
-      <option value="3" selected>Últimos 3 meses</option>
-      <option value="6">Últimos 6 meses</option>
-      <option value="12">Último ano</option>
-    </select>
+    <label>De</label>
+    <input type="date" id="filter-date-from"/>
   </div>
+  <div class="filter-group">
+    <label>Até</label>
+    <input type="date" id="filter-date-to"/>
+  </div>
+  <div class="filter-group" style="gap:4px">
+    <button class="btn-quick" onclick="setQuick(1)">Hoje</button>
+    <button class="btn-quick" onclick="setQuick(7)">7d</button>
+    <button class="btn-quick" onclick="setQuick(30)">30d</button>
+    <button class="btn-quick" onclick="setQuick(90)">90d</button>
+    <button class="btn-quick" onclick="setQuick(180)">6m</button>
+  </div>
+  <div class="filter-sep"></div>
   <div class="filter-group">
     <label>SDR</label>
     <select id="filter-sdr"><option value="all">Todos os SDRs</option></select>
@@ -256,7 +275,7 @@
     <label>Time</label>
     <select id="filter-team"><option value="all">Todos os times</option></select>
   </div>
-  <button class="btn-apply" onclick="applyFilters()">Aplicar Filtros</button>
+  <button class="btn-apply" onclick="applyFilters()">Aplicar</button>
   <div class="refresh-badge" id="refresh-badge">—</div>
 </div>
 
@@ -436,10 +455,35 @@ const API_KEY  = '0vS9fN5LXMQhOrl8weUgvbLqAcFeF8YS';
 const BASE_URL = 'https://api.meetime.com.br/v2';
 
 // ─── STATE ────────────────────────────────────────────────
-let dashData = null;   // { sdrs, trends, totalSDRs }
+let dashData = null;
 let sortCol  = 'calls.connected';
 let sortDir  = -1;
 let selectedFunnelSDR = null;
+
+// ─── DATE HELPERS ─────────────────────────────────────────
+function toDateStr(d) { return d.toISOString().slice(0,10); }
+function setQuick(days) {
+  const to = new Date(), from = new Date();
+  from.setDate(from.getDate() - (days - 1));
+  document.getElementById('filter-date-from').value = toDateStr(from);
+  document.getElementById('filter-date-to').value   = toDateStr(to);
+  document.querySelectorAll('.btn-quick').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  applyFilters();
+}
+function getDateRange() {
+  const fv = document.getElementById('filter-date-from').value;
+  const tv = document.getElementById('filter-date-to').value;
+  const from = fv ? new Date(fv+'T00:00:00') : (() => { const d=new Date(); d.setMonth(d.getMonth()-3); return d; })();
+  const to   = tv ? new Date(tv+'T23:59:59') : new Date();
+  return { from, to };
+}
+function initDates() {
+  const to = new Date(), from = new Date();
+  from.setMonth(from.getMonth() - 3);
+  document.getElementById('filter-date-from').value = toDateStr(from);
+  document.getElementById('filter-date-to').value   = toDateStr(to);
+}
 
 const COLORS = [
   '#1a4d3a','#2d6e52','#f5a623','#e8916e','#3498db',
@@ -508,8 +552,12 @@ async function fetchAll(endpoint, extraParams = {}, maxRecords = 500) {
 
 // ─── LOAD DATA ────────────────────────────────────────────
 async function loadDashboard() {
-  const months = parseInt(document.getElementById('filter-months').value);
   setLoading(true, 'Buscando usuários...');
+
+  const { from: cutoff, to: cutoffTo } = getDateRange();
+  // Fetch enough history to cover the selected range
+  const diffDays = Math.ceil((cutoffTo - cutoff) / (1000*60*60*24)) + 1;
+  const fetchMonths = Math.max(1, Math.ceil(diffDays / 30) + 1);
 
   try {
     // 1. Users
@@ -520,9 +568,6 @@ async function loadDashboard() {
     );
 
     if (!sdrs.length) throw new Error('Nenhum SDR v4company encontrado');
-
-    const cutoff = new Date();
-    cutoff.setMonth(cutoff.getMonth() - months);
 
     const allCalls = [];
     const allProsp = [];
@@ -554,11 +599,11 @@ async function loadDashboard() {
 
     setLoading(true, 'Processando métricas...');
 
-    // 3. Filter by period
-    const fCalls = allCalls.filter(c => new Date(c.date) >= cutoff);
-    const fProsp  = allProsp.filter(p => new Date(p.created_date) >= cutoff);
+    // 3. Filter by date range
+    const fCalls = allCalls.filter(c => { const d=new Date(c.date); return d>=cutoff && d<=cutoffTo; });
+    const fProsp  = allProsp.filter(p => { const d=new Date(p.created_date); return d>=cutoff && d<=cutoffTo; });
     const actDate = a => a.execution_date || a.available_from || a.updated;
-    const fActs   = allActs.filter(a => new Date(actDate(a)) >= cutoff);
+    const fActs   = allActs.filter(a => { const d=new Date(actDate(a)); return d>=cutoff && d<=cutoffTo; });
 
     // 4. Build per-SDR metrics
     const sdrMetrics = {};
@@ -1116,6 +1161,7 @@ function showTab(tab) {
 }
 
 // ─── INIT ─────────────────────────────────────────────────
+initDates();
 loadDashboard();
 </script>
 </body>
