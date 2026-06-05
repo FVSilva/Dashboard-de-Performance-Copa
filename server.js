@@ -254,6 +254,105 @@ app.get('/api/dashboard', async (req, res) => {
   }
 });
 
+// GET /api/inbound — métricas para SDRs com team_name contendo "INBOUND"
+app.get('/api/inbound', async (req, res) => {
+  try {
+    const { months = 3 } = req.query;
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - parseInt(months));
+
+    const usersRes = await cached('users', async () => {
+      const { data } = await meetime.get('/users');
+      return data.data.filter(u => u.email && u.email.includes('v4company'));
+    });
+
+    const inboundSDRs = usersRes.filter(u =>
+      u.role === 'SALESMAN' && u.active &&
+      u.team_name && u.team_name.toUpperCase().includes('INBOUND')
+    );
+
+    const allCalls = [], allProsp = [], allActs = [];
+
+    for (const sdr of inboundSDRs) {
+      try {
+        const calls = await cached(`calls_${sdr.id}`, () => fetchAll('/calls', { user_id: sdr.id }, 500));
+        allCalls.push(...calls.map(c => ({ ...c, _sdr_id: sdr.id, _sdr_name: sdr.name || sdr.email, _team: sdr.team_name })));
+      } catch (e) { console.error(`inbound calls ${sdr.id}:`, e.message); }
+      try {
+        const prosp = await cached(`prosp_${sdr.id}`, () => fetchAll('/prospections', { user_id: sdr.id }, 700));
+        allProsp.push(...prosp.map(p => ({ ...p, _sdr_id: sdr.id, _sdr_name: sdr.name || sdr.email, _team: sdr.team_name })));
+      } catch (e) { console.error(`inbound prosp ${sdr.id}:`, e.message); }
+      try {
+        const acts = await cached(`acts_${sdr.id}`, () => fetchAll('/prospections/activities', { assigned_to_id: sdr.id }, 500));
+        allActs.push(...acts.map(a => ({ ...a, _sdr_id: sdr.id, _sdr_name: sdr.name || sdr.email, _team: sdr.team_name })));
+      } catch (e) { console.error(`inbound acts ${sdr.id}:`, e.message); }
+    }
+
+    const fCalls = allCalls.filter(c => new Date(c.date) >= cutoff);
+    const fProsp  = allProsp.filter(p => new Date(p.created_date) >= cutoff);
+    const actDate = a => a.execution_date || a.available_from || a.updated;
+    const fActs   = allActs.filter(a => new Date(actDate(a)) >= cutoff);
+
+    const sdrMetrics = {};
+    for (const sdr of inboundSDRs) {
+      const id   = sdr.id;
+      const calls = fCalls.filter(c => c._sdr_id === id);
+      const prosp = fProsp.filter(p => p._sdr_id === id);
+      const acts  = fActs.filter(a => a._sdr_id === id);
+
+      const connected  = calls.filter(c => c.status === 'CONNECTED');
+      const meaningful = calls.filter(c => c.output === 'MEANINGFUL');
+      // Encerradas em até 10s = conectadas com duração <= 10s
+      const shortCalls = connected.filter(c => (c.connected_duration_seconds || 0) <= 10);
+      const totalDur   = connected.reduce((s, c) => s + (c.connected_duration_seconds || 0), 0);
+
+      const won    = prosp.filter(p => p.status === 'WON');
+      const lost   = prosp.filter(p => p.status === 'LOST');
+      const active = prosp.filter(p => p.status === 'EXECUTING' || p.status === 'WAITING');
+
+      const emailsDone    = acts.filter(a => a.type === 'E_MAIL'       && a.status === 'FINISHED');
+      const emailsPending = acts.filter(a => a.type === 'E_MAIL'       && a.status !== 'FINISHED');
+      const callsDone     = acts.filter(a => a.type === 'CALL'         && a.status === 'FINISHED');
+      const callsPending  = acts.filter(a => a.type === 'CALL'         && a.status !== 'FINISHED');
+      const waDone        = acts.filter(a => a.type === 'SOCIAL_POINT' && a.status === 'FINISHED');
+      const waPending     = acts.filter(a => a.type === 'SOCIAL_POINT' && a.status !== 'FINISHED');
+      const totalDone     = acts.filter(a => a.status === 'FINISHED');
+
+      sdrMetrics[id] = {
+        id, name: sdr.name || sdr.email, team: sdr.team_name,
+        calls: {
+          total: calls.length,
+          connected: connected.length,
+          meaningful: meaningful.length,
+          shortAbandons: shortCalls.length,
+          connectionRate:   calls.length      ? +((connected.length  / calls.length)      * 100).toFixed(1) : 0,
+          meaningfulRate:   connected.length  ? +((meaningful.length / connected.length)  * 100).toFixed(1) : 0,
+          shortAbandonRate: connected.length  ? +((shortCalls.length / connected.length)  * 100).toFixed(1) : 0,
+          avgDuration: connected.length ? Math.round(totalDur / connected.length) : 0
+        },
+        prospections: {
+          total: prosp.length, won: won.length, lost: lost.length, active: active.length,
+          wonRate:  prosp.length ? +((won.length  / prosp.length) * 100).toFixed(1) : 0,
+          lostRate: prosp.length ? +((lost.length / prosp.length) * 100).toFixed(1) : 0
+        },
+        activities: {
+          total: acts.length, done: totalDone.length,
+          completionRate: acts.length ? +((totalDone.length / acts.length) * 100).toFixed(1) : 0,
+          emailsDone:    emailsDone.length,    emailsPending: emailsPending.length,
+          callsDone:     callsDone.length,     callsPending:  callsPending.length,
+          whatsappDone:  waDone.length,        whatsappPending: waPending.length
+        }
+      };
+    }
+
+    const trends = buildMonthlyTrends(fCalls, fProsp, fActs);
+    res.json({ sdrs: Object.values(sdrMetrics), trends, teams: [...new Set(inboundSDRs.map(s => s.team_name).filter(Boolean))] });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 function buildMonthlyTrends(calls, prosp, acts) {
   const months = {};
   const now = new Date();

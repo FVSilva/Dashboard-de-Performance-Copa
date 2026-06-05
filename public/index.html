@@ -376,6 +376,7 @@
     <div class="tab active" onclick="showTab('overview')">Visão Geral</div>
     <div class="tab" onclick="showTab('funnel')">Funil por SDR</div>
     <div class="tab" onclick="showTab('calls')">Ligações</div>
+    <div class="tab" onclick="showTab('inbound')">📥 Inbound</div>
     <div class="tab" onclick="showTab('comparison')">Comparativo Mensal</div>
     <div class="tab" onclick="showTab('trends')">Tendências</div>
   </div>
@@ -508,6 +509,70 @@
     </div>
   </div>
 
+  <!-- TAB: INBOUND -->
+  <div id="tab-inbound" class="hidden">
+    <div class="section-title"><span>📥</span> Inbound — Performance dos SDRs</div>
+
+    <!-- KPIs Inbound -->
+    <div class="kpi-strip" id="inbound-kpis" style="margin-bottom:24px"></div>
+
+    <!-- Charts row 1 -->
+    <div class="charts-grid" style="margin-bottom:20px">
+      <div class="chart-card">
+        <h3><span>📞</span> Ligações por SDR — Total vs Conectadas</h3>
+        <div class="chart-wrap tall"><canvas id="ib-chart-calls"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <h3><span>🔽</span> Funil Inbound Consolidado</h3>
+        <div class="funnel-container" id="ib-funnel" style="padding:8px 0"></div>
+      </div>
+    </div>
+
+    <!-- Charts row 2 -->
+    <div class="charts-grid-3" style="margin-bottom:20px">
+      <div class="chart-card">
+        <h3><span>📧</span> Atividades por Canal</h3>
+        <div class="chart-wrap"><canvas id="ib-chart-channels"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <h3><span>🏆</span> Taxa de Conexão</h3>
+        <div class="chart-wrap"><canvas id="ib-chart-conn-rate"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <h3><span>🎯</span> WON vs Perdidos por SDR</h3>
+        <div class="chart-wrap"><canvas id="ib-chart-won-lost"></canvas></div>
+      </div>
+    </div>
+
+    <!-- Tabela Inbound -->
+    <div class="table-card">
+      <h3><span>👥</span> Performance Detalhada — SDRs Inbound</h3>
+      <table>
+        <thead><tr>
+          <th>SDR</th>
+          <th>Time</th>
+          <th>Ligações</th>
+          <th>Conectadas</th>
+          <th>% Conexão</th>
+          <th>Significativas</th>
+          <th>Enc. ≤10s</th>
+          <th>% Enc. ≤10s</th>
+          <th>Prospecções</th>
+          <th>WON</th>
+          <th>% WON</th>
+          <th>Perdidos</th>
+          <th>% Perdidos</th>
+          <th>Atividades</th>
+          <th>Exec.%</th>
+          <th>E-mail ✓</th>
+          <th>Ligação ✓</th>
+          <th>WhatsApp ✓</th>
+        </tr></thead>
+        <tbody id="inbound-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- TAB: COMPARISON -->
   <div id="tab-comparison" class="hidden">
     <div class="section-title"><span>📅</span> Comparativo Mês Atual vs Mês Anterior</div>
@@ -591,25 +656,29 @@ function renderChart(id, config) {
   charts[id] = new Chart(ctx, config);
 }
 
+let inboundData = null;
+
 async function loadDashboard() {
   const months = document.getElementById('filter-months').value;
   document.getElementById('loading').style.display = 'flex';
   document.getElementById('loading-sub').textContent = 'Buscando métricas consolidadas...';
 
   try {
-    const res = await fetch(`/api/dashboard?months=${months}`);
-    dashData = await res.json();
-
-    document.getElementById('loading-sub').textContent = 'Buscando dados de ligações...';
-    const callsRes = await fetch(`/api/calls?months=${months}`);
+    const [dashRes, callsRes, inboundRes] = await Promise.all([
+      fetch(`/api/dashboard?months=${months}`),
+      fetch(`/api/calls?months=${months}`),
+      fetch(`/api/inbound?months=${months}`)
+    ]);
+    dashData    = await dashRes.json();
     allCallsData = await callsRes.json();
+    inboundData = await inboundRes.json();
 
     populateFilters();
     renderAll();
     document.getElementById('last-update').textContent =
       'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
     document.getElementById('refresh-badge').textContent =
-      `${dashData.sdrs.length} SDRs • ${allCallsData.length.toLocaleString()} ligações`;
+      `${dashData.sdrs.length} SDRs Outbound • ${(inboundData.sdrs||[]).length} Inbound • ${allCallsData.length.toLocaleString()} ligações`;
   } catch(e) {
     console.error(e);
     alert('Erro ao carregar dados: ' + e.message);
@@ -661,6 +730,7 @@ function renderAll() {
   renderOverview();
   renderFunnel();
   renderCalls();
+  renderInbound();
   renderComparison();
   renderTrends();
 }
@@ -1059,6 +1129,155 @@ function renderCalls() {
   });
 }
 
+/* ===================== INBOUND ===================== */
+function renderInbound() {
+  if (!inboundData || !inboundData.sdrs || !inboundData.sdrs.length) return;
+  const sdrs = inboundData.sdrs;
+
+  const totCalls   = sdrs.reduce((s,r)=>s+r.calls.total,0);
+  const totConn    = sdrs.reduce((s,r)=>s+r.calls.connected,0);
+  const totMean    = sdrs.reduce((s,r)=>s+r.calls.meaningful,0);
+  const totShort   = sdrs.reduce((s,r)=>s+r.calls.shortAbandons,0);
+  const totProsp   = sdrs.reduce((s,r)=>s+r.prospections.total,0);
+  const totWon     = sdrs.reduce((s,r)=>s+r.prospections.won,0);
+  const totLost    = sdrs.reduce((s,r)=>s+r.prospections.lost,0);
+  const totActs    = sdrs.reduce((s,r)=>s+r.activities.total,0);
+  const totActsDone= sdrs.reduce((s,r)=>s+r.activities.done,0);
+  const connRate   = totCalls ? ((totConn/totCalls)*100).toFixed(1) : 0;
+  const wonRate    = totProsp ? ((totWon/totProsp)*100).toFixed(1) : 0;
+  const shortRate  = totConn  ? ((totShort/totConn)*100).toFixed(1) : 0;
+  const execRate   = totActs  ? ((totActsDone/totActs)*100).toFixed(1) : 0;
+
+  document.getElementById('inbound-kpis').innerHTML = [
+    {label:'Ligações',      val:totCalls.toLocaleString(),   cls:''},
+    {label:'Conectadas',    val:totConn.toLocaleString(),    cls:'orange'},
+    {label:'% Conexão',     val:connRate+'%',                cls:'light'},
+    {label:'Enc. ≤10s',     val:totShort.toLocaleString(),  cls:''},
+    {label:'% Enc. ≤10s',   val:shortRate+'%',              cls:'orange'},
+    {label:'Prospecções',   val:totProsp.toLocaleString(),   cls:'light'},
+    {label:'WON',           val:totWon.toLocaleString(),     cls:''},
+    {label:'% WON',         val:wonRate+'%',                 cls:'orange'},
+    {label:'Perdidos',      val:totLost.toLocaleString(),    cls:'light'},
+    {label:'Taxa Execução', val:execRate+'%',                cls:''},
+  ].map(k=>`<div class="kpi-card ${k.cls}">
+    <div class="kpi-label">${k.label}</div>
+    <div class="kpi-value">${k.val}</div>
+  </div>`).join('');
+
+  // Calls per SDR
+  renderChart('ib-chart-calls', {
+    type:'bar',
+    data:{labels:sdrs.map(s=>s.name||s.id),datasets:[
+      {label:'Total',         data:sdrs.map(s=>s.calls.total),      backgroundColor:'rgba(26,77,58,0.5)', borderRadius:4},
+      {label:'Conectadas',    data:sdrs.map(s=>s.calls.connected),  backgroundColor:'rgba(245,166,35,0.85)',borderRadius:4},
+      {label:'Significativas',data:sdrs.map(s=>s.calls.meaningful), backgroundColor:'rgba(46,204,113,0.8)',borderRadius:4},
+      {label:'Enc. ≤10s',    data:sdrs.map(s=>s.calls.shortAbandons),backgroundColor:'rgba(231,76,60,0.7)',borderRadius:4},
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom'}},
+      scales:{x:{ticks:{font:{size:11}}},y:{grid:{color:'rgba(0,0,0,0.04)'}}}}
+  });
+
+  // Funnel
+  const funnelEl = document.getElementById('ib-funnel');
+  const fStages = [
+    {label:'Prospecções',    value:totProsp,  color:'#1a4d3a', sub:'leads em cadência'},
+    {label:'Ligações',       value:totCalls,  color:'#2d6e52', sub:'contatos tentados'},
+    {label:'Conectadas',     value:totConn,   color:'#f5a623', sub:'ligações atendidas'},
+    {label:'Significativas', value:totMean,   color:'#e67e22', sub:'contato qualificado'},
+    {label:'WON 🏆',         value:totWon,    color:'#2ecc71', sub:'oportunidades ganhas'},
+  ];
+  const fMax = fStages[0].value || 1;
+  funnelEl.innerHTML = fStages.map((st,i)=>{
+    const w = Math.max((st.value/fMax)*100, 4);
+    const conv = i>0 && fStages[i-1].value>0 ? ((st.value/fStages[i-1].value)*100).toFixed(1) : null;
+    const rc = conv < 20 ? '#e74c3c' : conv < 50 ? '#e67e22' : '#27ae60';
+    return `
+      ${i>0?`<div style="display:flex;align-items:center;margin:2px 0 2px 138px;gap:8px">
+        <div style="font-size:18px;color:var(--muted)">↓</div>
+        <div style="font-size:12px;font-weight:700;color:${rc}">${conv}% conversão</div>
+      </div>`:''}
+      <div style="display:flex;align-items:center;margin-bottom:4px">
+        <div style="width:130px;text-align:right;padding-right:12px;flex-shrink:0">
+          <div style="font-size:12px;font-weight:600">${st.label}</div>
+          <div style="font-size:10px;color:var(--muted)">${st.sub}</div>
+        </div>
+        <div style="flex:1">
+          <div style="height:38px;border-radius:6px;background:${st.color};width:${w}%;
+            display:flex;align-items:center;justify-content:space-between;padding:0 12px;min-width:70px;
+            box-shadow:0 2px 6px rgba(0,0,0,0.12)">
+            <span style="color:#fff;font-size:14px;font-weight:800">${st.value.toLocaleString()}</span>
+            <span style="color:rgba(255,255,255,0.7);font-size:11px">${w.toFixed(0)}%</span>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  // Channels stacked
+  renderChart('ib-chart-channels', {
+    type:'bar',
+    data:{labels:sdrs.map(s=>s.name||s.id),datasets:[
+      {label:'E-mail ✓',   data:sdrs.map(s=>s.activities.emailsDone),    backgroundColor:'#3498db'},
+      {label:'E-mail ⏳',  data:sdrs.map(s=>s.activities.emailsPending),  backgroundColor:'rgba(52,152,219,0.35)'},
+      {label:'Ligação ✓',  data:sdrs.map(s=>s.activities.callsDone),     backgroundColor:'#1a4d3a'},
+      {label:'Ligação ⏳', data:sdrs.map(s=>s.activities.callsPending),  backgroundColor:'rgba(26,77,58,0.3)'},
+      {label:'WhatsApp ✓', data:sdrs.map(s=>s.activities.whatsappDone),  backgroundColor:'#25d366'},
+      {label:'WhatsApp ⏳',data:sdrs.map(s=>s.activities.whatsappPending),backgroundColor:'rgba(37,211,102,0.3)'},
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{position:'bottom',labels:{font:{size:10},boxWidth:10}}},
+      scales:{x:{stacked:true,ticks:{font:{size:10}}},y:{stacked:true,grid:{color:'rgba(0,0,0,0.04)'}}}}
+  });
+
+  // Connection rate
+  renderChart('ib-chart-conn-rate', {
+    type:'bar',
+    data:{labels:sdrs.map(s=>s.name||s.id),datasets:[
+      {label:'% Conexão',data:sdrs.map(s=>s.calls.connectionRate),backgroundColor:'rgba(26,77,58,0.75)',borderRadius:4}
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,indexAxis:'y',plugins:{legend:{display:false}},
+      scales:{x:{max:100,ticks:{callback:v=>v+'%'}}}}
+  });
+
+  // WON vs Lost
+  renderChart('ib-chart-won-lost', {
+    type:'bar',
+    data:{labels:sdrs.map(s=>s.name||s.id),datasets:[
+      {label:'WON',    data:sdrs.map(s=>s.prospections.won),   backgroundColor:'rgba(46,204,113,0.85)', borderRadius:4},
+      {label:'Perdidos',data:sdrs.map(s=>s.prospections.lost), backgroundColor:'rgba(231,76,60,0.7)',   borderRadius:4},
+      {label:'Ativos', data:sdrs.map(s=>s.prospections.active),backgroundColor:'rgba(52,152,219,0.65)', borderRadius:4},
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom'}},
+      scales:{x:{ticks:{font:{size:10}}},y:{grid:{color:'rgba(0,0,0,0.04)'}}}}
+  });
+
+  // Table
+  document.getElementById('inbound-tbody').innerHTML = sdrs.map(s => {
+    const cr = s.calls.connectionRate;
+    const wr = s.prospections.wonRate;
+    const acts = s.activities;
+    return `<tr>
+      <td class="sdr-name"><div class="avatar">${initials(s.name)}</div>${s.name||s.id}</td>
+      <td><span style="font-size:11px;background:rgba(245,166,35,0.15);color:#c87600;padding:2px 8px;border-radius:12px">${s.team||'—'}</span></td>
+      <td>${s.calls.total.toLocaleString()}</td>
+      <td>${s.calls.connected.toLocaleString()}</td>
+      <td><span class="badge ${cr>=30?'green':cr>=15?'orange':'red'}">${cr}%</span></td>
+      <td>${s.calls.meaningful.toLocaleString()}</td>
+      <td>${s.calls.shortAbandons.toLocaleString()}</td>
+      <td><span class="badge ${s.calls.shortAbandonRate<=10?'green':s.calls.shortAbandonRate<=25?'orange':'red'}">${s.calls.shortAbandonRate}%</span></td>
+      <td>${s.prospections.total.toLocaleString()}</td>
+      <td>${s.prospections.won.toLocaleString()}</td>
+      <td><span class="badge ${wr>=10?'green':wr>=5?'orange':'red'}">${wr}%</span></td>
+      <td>${s.prospections.lost.toLocaleString()}</td>
+      <td><span class="badge ${s.prospections.lostRate<=30?'green':s.prospections.lostRate<=60?'orange':'red'}">${s.prospections.lostRate}%</span></td>
+      <td>${acts.total.toLocaleString()}</td>
+      <td><div class="rate-bar"><div class="bar-track"><div class="bar-fill orange" style="width:${Math.min(acts.completionRate,100)}%"></div></div><span>${acts.completionRate}%</span></div></td>
+      <td>${acts.emailsDone} <span style="color:var(--muted);font-size:11px">(+${acts.emailsPending})</span></td>
+      <td>${acts.callsDone} <span style="color:var(--muted);font-size:11px">(+${acts.callsPending})</span></td>
+      <td>${acts.whatsappDone} <span style="color:var(--muted);font-size:11px">(+${acts.whatsappPending})</span></td>
+    </tr>`;
+  }).join('');
+}
+
 /* ===================== COMPARISON ===================== */
 function renderComparison() {
   const trends = dashData.trends;
@@ -1181,7 +1400,7 @@ function showTab(tab) {
   document.querySelectorAll('[id^="tab-"]').forEach(el => el.classList.add('hidden'));
   document.getElementById('tab-'+tab).classList.remove('hidden');
   document.querySelectorAll('.tab').forEach((el,i) => {
-    el.classList.toggle('active', ['overview','funnel','calls','comparison','trends'][i]===tab);
+    el.classList.toggle('active', ['overview','funnel','calls','inbound','comparison','trends'][i]===tab);
   });
   currentTab = tab;
 }
