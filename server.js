@@ -110,14 +110,13 @@ function loadCacheFromDisk() {
   try {
     if (!require('fs').existsSync(CACHE_FILE)) return;
     const { cache: c, cacheTime: ct, savedAt } = JSON.parse(require('fs').readFileSync(CACHE_FILE, 'utf8'));
-    // Only restore if saved less than 15 minutes ago
-    if (Date.now() - savedAt < CACHE_TTL) {
-      cache = c;
-      cacheTime = ct;
-      console.log('Cache restaurado do disco (' + Object.keys(c).length + ' entradas)');
-    } else {
-      console.log('Cache em disco expirado — buscando dados frescos');
-    }
+    // Sempre carrega do disco (mesmo expirado) para servir dados imediatamente
+    // O auto-refresh em background vai atualizar com dados frescos
+    cache = c;
+    cacheTime = ct;
+    const ageMin = ((Date.now() - savedAt) / 60000).toFixed(0);
+    const fresh = Date.now() - savedAt < CACHE_TTL;
+    console.log(`Cache do disco: ${Object.keys(c).length} entradas, ${ageMin}min atrás ${fresh ? '✓ fresco' : '(desatualizado — refresh em andamento)'}`);
   } catch (e) { console.error('Cache load error:', e.message); }
 }
 
