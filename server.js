@@ -140,12 +140,17 @@ async function syncEndpoint(endpoint, extraParams, cutoff6m) {
       await sleep(200);
     }
 
-    // Merge: stored + novos, filtrando os mais antigos que 6 meses
     const merged = [...stored, ...newRecords]
       .filter(r => new Date(getRecordDate(r)) >= cutoff6m);
 
     cache[dataKey] = merged;
     cache[mk] = { fetchedTotal: currentTotal };
+
+  } else if (currentTotal < meta.fetchedTotal) {
+    // --- totalItems diminuiu (registros deletados/arquivados) — re-fetch completo ---
+    console.log(`    re-fetch ${endpoint}: total caiu ${meta.fetchedTotal}→${currentTotal}`);
+    cache[mk] = { fetchedTotal: 0 }; // reset para forçar sync inicial
+    return syncEndpoint(endpoint, extraParams, cutoff6m);
     return merged;
 
   } else {
