@@ -77,18 +77,17 @@ async function apiGet(endpoint, params) {
 // Na próxima vez, só busca os novos (delta). Resultado: de 80 páginas para 1.
 // ──────────────────────────────────────────────────────────────────────────────
 
-function metaKey(endpoint, params) {
+// Gera chaves consistentes com o restante do código
+function cacheKeys(endpoint, params) {
   const id = params.user_id || params.assigned_to_id || 'all';
-  const ep = endpoint.replace(/\//g, '_');
-  return `meta${ep}_${id}`;
+  if (endpoint === '/calls')                    return { data: `calls_${id}`,     meta: `meta_calls_${id}` };
+  if (endpoint === '/prospections')             return { data: `prosp_${id}`,     meta: `meta_prosp_${id}` };
+  if (endpoint === '/prospections/activities')  return { data: `acts_${id}`,      meta: `meta_acts_${id}` };
+  return { data: `data_${endpoint}_${id}`, meta: `meta_${endpoint}_${id}` };
 }
 
-// Retorna os registros atualizados para um endpoint + SDR.
-// - 1ª vez: busca tudo desde 6 meses atrás (lento, mas único)
-// - Próximas vezes: só busca o delta (rápido)
 async function syncEndpoint(endpoint, extraParams, cutoff6m) {
-  const mk = metaKey(endpoint, extraParams);
-  const dataKey = mk.replace('meta', 'data');
+  const { data: dataKey, meta: mk } = cacheKeys(endpoint, extraParams);
   const meta = cache[mk] || { fetchedTotal: 0 };
   const stored = cache[dataKey] || [];
 
