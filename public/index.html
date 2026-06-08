@@ -655,6 +655,8 @@ const API = '';
 let dashData = null;
 let allCallsData = [];
 let inboundData = null;
+let loadedDateFrom = '';
+let loadedDateTo = '';
 let currentTab = 'overview';
 let sortCol = 'calls.connected';
 let sortDir = -1;
@@ -841,6 +843,10 @@ async function loadDashboard() {
     allCallsData = await callsRes.json();
     inboundData = await inboundRes.json();
 
+    // Salva o período que foi carregado para evitar reload desnecessário
+    loadedDateFrom = document.getElementById('filter-date-from').value;
+    loadedDateTo   = document.getElementById('filter-date-to').value;
+
     populateFilters();
     renderAll();
     document.getElementById('last-update').textContent =
@@ -897,7 +903,16 @@ function populateFilters() {
   teams.forEach(t => { teamSel.innerHTML += `<option value="${t}">${t}</option>`; });
 }
 
-function applyFilters() { loadDashboard(); }
+function applyFilters() {
+  // Só recarrega da API se a data mudou — SDR/Time filtram localmente
+  const curFrom = document.getElementById('filter-date-from').value;
+  const curTo   = document.getElementById('filter-date-to').value;
+  if (curFrom !== loadedDateFrom || curTo !== loadedDateTo) {
+    loadDashboard();
+  } else {
+    renderAll();
+  }
+}
 
 function renderAll() {
   renderOverview();

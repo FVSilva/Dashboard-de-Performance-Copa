@@ -523,6 +523,8 @@ const BASE_URL = 'https://api.meetime.com.br/v2';
 // ─── STATE ────────────────────────────────────────────────
 let dashData = null;
 let inboundData = null;
+let loadedDateFrom = '';
+let loadedDateTo = '';
 let sortCol  = 'calls.connected';
 let sortDir  = -1;
 let selectedFunnelSDR = null;
@@ -810,6 +812,9 @@ async function loadDashboard() {
     const allSdrMetrics = Object.values(sdrMetrics);
     dashData = { sdrs: allSdrMetrics, _allSDRs: allSdrMetrics, trends, totalSDRs: sdrs.length };
 
+    loadedDateFrom = document.getElementById('filter-date-from').value;
+    loadedDateTo   = document.getElementById('filter-date-to').value;
+
     populateFilters();
     renderAll();
 
@@ -913,7 +918,15 @@ function getFilteredSDRs() {
   return sdrs;
 }
 
-function applyFilters() { loadDashboard(); }
+function applyFilters() {
+  const curFrom = document.getElementById('filter-date-from').value;
+  const curTo   = document.getElementById('filter-date-to').value;
+  if (curFrom !== loadedDateFrom || curTo !== loadedDateTo) {
+    loadDashboard();
+  } else {
+    renderAll();
+  }
+}
 
 function renderAll() {
   renderInbound();
