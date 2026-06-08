@@ -47,71 +47,111 @@ async function fetchAll(endpoint, extraParams = {}, maxRecords = 1000) {
   return results;
 }
 
-// Retorna o campo de data do registro dependendo do endpoint
-function getRecordDate(record) {
-  return record.date || record.created_date || record.execution_date || record.available_from || record.updated;
+// Retorna o campo de data do registro
+function getRecordDate(r) {
+  return r.date || r.created_date || r.execution_date || r.available_from || r.updated;
 }
 
-// fetchSince: busca TODOS os registros desde cutoffDate
-// API retorna oldest-first — varremos do fim para o início até atingir a data de corte
-async function fetchSince(endpoint, extraParams = {}, cutoffDate) {
-  let peek;
-  try {
-    peek = await meetime.get(endpoint, { params: { limit: 1, start: 0, ...extraParams } });
-  } catch (e) { return []; }
-
-  const total = peek.data.totalItems || 0;
-  if (!total) return [];
-
-  const limit = 100;
-  const results = [];
-  let start = Math.max(0, total - limit);
-
-  while (true) {
-    let retries = 5, resp;
-    while (retries > 0) {
-      try {
-        resp = await meetime.get(endpoint, { params: { limit, start, ...extraParams } });
-        break;
-      } catch (e) {
-        if (e.response && e.response.status === 429) {
-          const waitMs = (6 - retries) * 3000;
-          console.log(`429 em ${endpoint} — aguardando ${waitMs}ms`);
-          await sleep(waitMs);
-          retries--;
-        } else throw e;
-      }
+// Faz uma requisição com retry em 429 e ECONNRESET
+async function apiGet(endpoint, params) {
+  let retries = 5;
+  while (retries > 0) {
+    try {
+      return await meetime.get(endpoint, { params });
+    } catch (e) {
+      const is429 = e.response && e.response.status === 429;
+      const isReset = e.code === 'ECONNRESET' || e.code === 'ETIMEDOUT';
+      if (is429 || isReset) {
+        const waitMs = (6 - retries) * 3000;
+        console.log(`${e.code || 429} em ${endpoint} — aguardando ${waitMs}ms`);
+        await sleep(waitMs);
+        retries--;
+      } else throw e;
     }
-    if (!resp) break;
-
-    const page = resp.data.data || [];
-    if (!page.length) break;
-
-    // Filtra só registros dentro do período
-    const inPeriod = page.filter(r => new Date(getRecordDate(r)) >= cutoffDate);
-    results.unshift(...inPeriod); // mantém ordem cronológica
-
-    // Se toda a página é mais antiga que o cutoff, podemos parar
-    const allOld = page.every(r => new Date(getRecordDate(r)) < cutoffDate);
-    if (allOld || start === 0) break;
-
-    start = Math.max(0, start - limit);
-    await sleep(300);
   }
-
-  return results;
+  throw new Error(`Falhou após 5 tentativas: ${endpoint}`);
 }
 
-// fetchRecent: mantido para compatibilidade (pre-warm usa limite menor para atividades)
-async function fetchRecent(endpoint, extraParams = {}, maxRecords = 500) {
-  let peek;
-  try {
-    peek = await meetime.get(endpoint, { params: { limit: 1, start: 0, ...extraParams } });
-  } catch (e) { return []; }
-  const total = peek.data.totalItems || 0;
-  if (!total) return [];
-  const startOffset = Math.max(0, total - maxRecords);
-  return fetchAllFrom(endpoint, extraParams, startOffset, maxRecords);
+// ─── SYNC INCREMENTAL ──────────────────────────────────────────────────────────
+// Guarda quantos registros cada SDR/endpoint tinha no último sync.
+// Na próxima vez, só busca os novos (delta). Resultado: de 80 páginas para 1.
+// ──────────────────────────────────────────────────────────────────────────────
+
+function metaKey(endpoint, params) {
+  const id = params.user_id || params.assigned_to_id || 'all';
+  const ep = endpoint.replace(/\//g, '_');
+  return `meta${ep}_${id}`;
+}
+
+// Retorna os registros atualizados para um endpoint + SDR.
+// - 1ª vez: busca tudo desde 6 meses atrás (lento, mas único)
+// - Próximas vezes: só busca o delta (rápido)
+async function syncEndpoint(endpoint, extraParams, cutoff6m) {
+  const mk = metaKey(endpoint, extraParams);
+  const dataKey = mk.replace('meta', 'data');
+  const meta = cache[mk] || { fetchedTotal: 0 };
+  const stored = cache[dataKey] || [];
+
+  // Peek para saber total atual
+  const peek = await apiGet(endpoint, { limit: 1, start: 0, ...extraParams });
+  const currentTotal = peek.data.totalItems || 0;
+  if (!currentTotal) return stored;
+
+  if (meta.fetchedTotal === 0) {
+    // --- PRIMEIRA VEZ: busca tudo desde 6 meses atrás (fetchSince) ---
+    console.log(`    sync inicial ${endpoint} (total=${currentTotal})...`);
+    const limit = 100;
+    const results = [];
+    let start = Math.max(0, currentTotal - limit);
+
+    while (true) {
+      const resp = await apiGet(endpoint, { limit, start, ...extraParams });
+      const page = resp.data.data || [];
+      if (!page.length) break;
+
+      const inPeriod = page.filter(r => new Date(getRecordDate(r)) >= cutoff6m);
+      results.unshift(...inPeriod);
+
+      if (page.every(r => new Date(getRecordDate(r)) < cutoff6m) || start === 0) break;
+      start = Math.max(0, start - limit);
+      await sleep(300);
+    }
+
+    cache[dataKey] = results;
+    cache[mk] = { fetchedTotal: currentTotal };
+    return results;
+
+  } else if (currentTotal > meta.fetchedTotal) {
+    // --- DELTA: só busca os registros novos ---
+    const deltaCount = currentTotal - meta.fetchedTotal;
+    console.log(`    delta ${endpoint}: +${deltaCount} novos registros`);
+
+    const newRecords = [];
+    let start = meta.fetchedTotal;
+    const limit = 100;
+
+    while (newRecords.length < deltaCount) {
+      const resp = await apiGet(endpoint, { limit, start, ...extraParams });
+      const page = resp.data.data || [];
+      if (!page.length) break;
+      newRecords.push(...page);
+      if (!resp.data.next || newRecords.length >= deltaCount) break;
+      start += limit;
+      await sleep(200);
+    }
+
+    // Merge: stored + novos, filtrando os mais antigos que 6 meses
+    const merged = [...stored, ...newRecords]
+      .filter(r => new Date(getRecordDate(r)) >= cutoff6m);
+
+    cache[dataKey] = merged;
+    cache[mk] = { fetchedTotal: currentTotal };
+    return merged;
+
+  } else {
+    // Sem novos registros
+    return stored;
+  }
 }
 
 async function fetchAllFrom(endpoint, extraParams = {}, startOffset = 0, maxRecords = 500) {
@@ -541,9 +581,9 @@ app.get('/api/cache-status', async (req, res) => {
   const status = sdrs.map(s => ({
     id: s.id,
     name: s.name || s.email,
-    calls: !!cache[`calls_${s.id}`],
-    prosp: !!cache[`prosp_${s.id}`],
-    acts:  !!cache[`acts_${s.id}`]
+    calls: !!(cache[`calls_${s.id}`]?.length),
+    prosp: !!(cache[`prosp_${s.id}`] !== undefined),
+    acts:  !!(cache[`acts_${s.id}`]?.length)
   }));
   const ready = status.filter(s => s.calls && s.prosp && s.acts).length;
   res.json({ ready, total: status.length, sdrs: status });
@@ -563,31 +603,25 @@ async function refreshAllSDRs(label = 'refresh') {
     cache['users'] = allUsers;
     cacheTime['users'] = Date.now();
 
-    // Cutoff: busca dados dos últimos 6 meses (cobre todos os períodos do dashboard)
     const cutoff6m = new Date(); cutoff6m.setMonth(cutoff6m.getMonth() - 6);
 
-    // Processa 2 SDRs por vez para não sobrecarregar a API
-    for (let i = 0; i < sdrs.length; i += 2) {
-      const batch = sdrs.slice(i, i + 2);
-      await Promise.all(batch.map(async sdr => {
-        const name = sdr.name || sdr.email;
-        try {
-          const calls = await fetchSince('/calls', { user_id: sdr.id }, cutoff6m);
-          cache[`calls_${sdr.id}`] = calls; cacheTime[`calls_${sdr.id}`] = Date.now();
-          console.log(`  [${label}] calls ${name}: ${calls.length}`);
-        } catch (e) { console.error(`[${label}] calls FAILED ${name}:`, e.message); }
-        try {
-          const prosp = await fetchSince('/prospections', { user_id: sdr.id }, cutoff6m);
-          cache[`prosp_${sdr.id}`] = prosp; cacheTime[`prosp_${sdr.id}`] = Date.now();
-          console.log(`  [${label}] prosp ${name}: ${prosp.length}`);
-        } catch (e) { console.error(`[${label}] prosp FAILED ${name}:`, e.message); }
-        try {
-          const acts = await fetchSince('/prospections/activities', { assigned_to_id: sdr.id }, cutoff6m);
-          cache[`acts_${sdr.id}`] = acts; cacheTime[`acts_${sdr.id}`] = Date.now();
-          console.log(`  [${label}] acts  ${name}: ${acts.length}`);
-        } catch (e) { console.error(`[${label}] acts FAILED ${name}:`, e.message); }
-      }));
-      if (i + 2 < sdrs.length) await sleep(800);
+    // Sync incremental: 1ª vez busca tudo desde 6 meses, depois só o delta
+    for (const sdr of sdrs) {
+      const name = sdr.name || sdr.email;
+      try {
+        const calls = await syncEndpoint('/calls', { user_id: sdr.id }, cutoff6m);
+        cache[`calls_${sdr.id}`] = calls; cacheTime[`calls_${sdr.id}`] = Date.now();
+      } catch (e) { console.error(`[${label}] calls FAILED ${name}:`, e.message); }
+      try {
+        const prosp = await syncEndpoint('/prospections', { user_id: sdr.id }, cutoff6m);
+        cache[`prosp_${sdr.id}`] = prosp; cacheTime[`prosp_${sdr.id}`] = Date.now();
+      } catch (e) { console.error(`[${label}] prosp FAILED ${name}:`, e.message); }
+      try {
+        const acts = await syncEndpoint('/prospections/activities', { assigned_to_id: sdr.id }, cutoff6m);
+        cache[`acts_${sdr.id}`] = acts; cacheTime[`acts_${sdr.id}`] = Date.now();
+      } catch (e) { console.error(`[${label}] acts FAILED ${name}:`, e.message); }
+      console.log(`  [${label}] ${name}: calls=${cache[`calls_${sdr.id}`]?.length||0} prosp=${cache[`prosp_${sdr.id}`]?.length||0} acts=${cache[`acts_${sdr.id}`]?.length||0}`);
+      await sleep(400);
     }
 
     // Pré-computa resultados agregados para os períodos mais comuns
