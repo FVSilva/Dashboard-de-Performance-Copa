@@ -263,23 +263,45 @@
   /* LOADING */
   .loading-overlay {
     position:fixed; inset:0;
-    background:rgba(26,77,58,0.85);
+    background:rgba(26,77,58,0.92);
     display:flex; flex-direction:column;
     align-items:center; justify-content:center;
-    z-index:999;
-    color:#fff;
+    z-index:999; color:#fff;
+    gap:0;
   }
   .spinner {
-    width:48px; height:48px;
-    border:4px solid rgba(255,255,255,0.3);
+    width:52px; height:52px;
+    border:4px solid rgba(255,255,255,0.2);
     border-top:4px solid var(--orange);
     border-radius:50%;
     animation:spin 0.8s linear infinite;
-    margin-bottom:16px;
+    margin-bottom:20px;
   }
   @keyframes spin { to{transform:rotate(360deg)} }
-  .loading-text { font-size:16px; font-weight:500; }
-  .loading-sub { font-size:13px; opacity:0.7; margin-top:6px; }
+  .loading-text { font-size:18px; font-weight:600; }
+  .loading-sub  { font-size:13px; opacity:0.7; margin-top:8px; max-width:340px; text-align:center; }
+  .loading-progress-wrap {
+    width:280px; height:6px;
+    background:rgba(255,255,255,0.15);
+    border-radius:3px; margin-top:20px; overflow:hidden;
+  }
+  .loading-progress-bar {
+    height:100%; background:var(--orange);
+    border-radius:3px; transition:width 0.4s ease;
+    width:0%;
+  }
+  .loading-sdrs {
+    display:flex; flex-wrap:wrap; gap:6px;
+    max-width:360px; justify-content:center;
+    margin-top:16px;
+  }
+  .loading-sdr-chip {
+    font-size:11px; padding:3px 10px; border-radius:20px;
+    border:1px solid rgba(255,255,255,0.2);
+    background:rgba(255,255,255,0.08);
+    transition:all 0.3s;
+  }
+  .loading-sdr-chip.done { background:rgba(245,166,35,0.3); border-color:var(--orange); }
 
   /* SECTION TITLES */
   .section-title {
@@ -321,8 +343,12 @@
 
 <div class="loading-overlay" id="loading">
   <div class="spinner"></div>
-  <div class="loading-text">Carregando dados Meetime...</div>
-  <div class="loading-sub" id="loading-sub">Buscando usuários e atividades</div>
+  <div class="loading-text">Dashboard SDR — Copa Energia</div>
+  <div class="loading-sub" id="loading-sub">Conectando à API Meetime...</div>
+  <div class="loading-progress-wrap">
+    <div class="loading-progress-bar" id="loading-bar"></div>
+  </div>
+  <div class="loading-sdrs" id="loading-sdrs"></div>
 </div>
 
 <header>
@@ -772,9 +798,33 @@ function renderChart(id, config) {
   charts[id] = new Chart(ctx, config);
 }
 
+async function pollCacheStatus() {
+  try {
+    const s = await fetch('/api/cache-status').then(r=>r.json());
+    const bar   = document.getElementById('loading-bar');
+    const sub   = document.getElementById('loading-sub');
+    const chips = document.getElementById('loading-sdrs');
+    if (!s || !s.total) return;
+    const pct = Math.round((s.ready / s.total) * 100);
+    if (bar)   bar.style.width = pct + '%';
+    if (sub)   sub.textContent = s.ready === s.total
+      ? 'Dados prontos! Renderizando...'
+      : `Carregando SDRs: ${s.ready}/${s.total} prontos`;
+    if (chips && s.sdrs) {
+      chips.innerHTML = s.sdrs.map(sd =>
+        `<div class="loading-sdr-chip ${sd.calls && sd.prosp && sd.acts ? 'done' : ''}">${(sd.name||sd.id).split(' ')[0]}</div>`
+      ).join('');
+    }
+  } catch(_) {}
+}
+
 async function loadDashboard() {
   document.getElementById('loading').style.display = 'flex';
-  document.getElementById('loading-sub').textContent = 'Buscando métricas consolidadas...';
+  document.getElementById('loading-sub').textContent = 'Conectando à API Meetime...';
+  document.getElementById('loading-bar').style.width = '5%';
+
+  // Poll cache status while loading for live progress display
+  const statusInterval = setInterval(pollCacheStatus, 1200);
 
   const { from, to } = getDateRange();
   const diffDays = Math.ceil((to - from) / (1000*60*60*24)) + 1;
@@ -799,9 +849,12 @@ async function loadDashboard() {
       `${dashData.sdrs.length} SDRs Outbound • ${(inboundData.sdrs||[]).length} Inbound • ${allCallsData.length.toLocaleString()} ligações`;
   } catch(e) {
     console.error(e);
-    alert('Erro ao carregar dados: ' + e.message);
+    document.getElementById('loading-sub').textContent = '❌ ' + e.message;
+    setTimeout(() => document.getElementById('loading').style.display = 'none', 4000);
   } finally {
-    document.getElementById('loading').style.display = 'none';
+    clearInterval(statusInterval);
+    document.getElementById('loading-bar').style.width = '100%';
+    setTimeout(() => document.getElementById('loading').style.display = 'none', 300);
   }
 }
 
