@@ -97,11 +97,36 @@ let cache = {};
 let cacheTime = {};
 const CACHE_TTL = 15 * 60 * 1000;
 
+const CACHE_FILE = path.join(__dirname, '.cache.json');
+
+function saveCacheToDisk() {
+  try {
+    const snapshot = { cache, cacheTime, savedAt: Date.now() };
+    require('fs').writeFileSync(CACHE_FILE, JSON.stringify(snapshot));
+  } catch (e) { console.error('Cache save error:', e.message); }
+}
+
+function loadCacheFromDisk() {
+  try {
+    if (!require('fs').existsSync(CACHE_FILE)) return;
+    const { cache: c, cacheTime: ct, savedAt } = JSON.parse(require('fs').readFileSync(CACHE_FILE, 'utf8'));
+    // Only restore if saved less than 15 minutes ago
+    if (Date.now() - savedAt < CACHE_TTL) {
+      cache = c;
+      cacheTime = ct;
+      console.log('Cache restaurado do disco (' + Object.keys(c).length + ' entradas)');
+    } else {
+      console.log('Cache em disco expirado — buscando dados frescos');
+    }
+  } catch (e) { console.error('Cache load error:', e.message); }
+}
+
 async function cached(key, fn) {
   const now = Date.now();
   if (cache[key] && now - cacheTime[key] < CACHE_TTL) return cache[key];
   cache[key] = await fn();
   cacheTime[key] = now;
+  saveCacheToDisk();   // persist cache to disk after every update
   return cache[key];
 }
 
@@ -446,6 +471,24 @@ function buildMonthlyTrends(calls, prosp, acts, numMonths = 6) {
   return Object.values(months);
 }
 
+// GET /api/cache-status — shows which SDRs are cached
+app.get('/api/cache-status', async (req, res) => {
+  const usersData = cache['users'] || [];
+  const sdrs = usersData.filter(u => u.role === 'SALESMAN' && u.active);
+  const status = sdrs.map(s => ({
+    id: s.id,
+    name: s.name || s.email,
+    calls: !!cache[`calls_${s.id}`],
+    prosp: !!cache[`prosp_${s.id}`],
+    acts:  !!cache[`acts_${s.id}`]
+  }));
+  const ready = status.filter(s => s.calls && s.prosp && s.acts).length;
+  res.json({ ready, total: status.length, sdrs: status });
+});
+
+// Load cache immediately on startup (before the pre-warm setTimeout)
+loadCacheFromDisk();
+
 const PORT = 4000;
 app.listen(PORT, () => {
   console.log(`Dashboard running at http://localhost:${PORT}`);
@@ -457,24 +500,31 @@ app.listen(PORT, () => {
       const sdrs = ud.data.filter(u => u.email && u.email.includes('v4company') && u.role === 'SALESMAN' && u.active);
       cache['users'] = ud.data.filter(u => u.email && u.email.includes('v4company'));
       cacheTime['users'] = Date.now();
-      for (const sdr of sdrs.slice(0, 20)) {
-        const name = sdr.name || sdr.email;
-        try {
-          const calls = await fetchRecent('/calls', { user_id: sdr.id }, 2000);
-          cache[`calls_${sdr.id}`] = calls; cacheTime[`calls_${sdr.id}`] = Date.now();
-          console.log(`  pre-warm calls ${name}: ${calls.length}`);
-        } catch (e) { console.error(`pre-warm calls FAILED ${name}:`, e.message); }
-        try {
-          const prosp = await fetchRecent('/prospections', { user_id: sdr.id }, 2000);
-          cache[`prosp_${sdr.id}`] = prosp; cacheTime[`prosp_${sdr.id}`] = Date.now();
-          console.log(`  pre-warm prosp ${name}: ${prosp.length}`);
-        } catch (e) { console.error(`pre-warm prosp FAILED ${name}:`, e.message); }
-        try {
-          const acts = await fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 1000);
-          cache[`acts_${sdr.id}`] = acts; cacheTime[`acts_${sdr.id}`] = Date.now();
-          console.log(`  pre-warm acts  ${name}: ${acts.length}`);
-        } catch (e) { console.error(`pre-warm acts FAILED ${name}:`, e.message); }
-        await sleep(500); // inter-SDR delay
+      // Sort: keep order from Meetime (already optimal for our SDRs)
+      const sorted = sdrs.slice(0, 20);
+
+      // Process 2 SDRs in parallel at a time
+      for (let i = 0; i < sorted.length; i += 2) {
+        const batch = sorted.slice(i, i + 2);
+        await Promise.all(batch.map(async sdr => {
+          const name = sdr.name || sdr.email;
+          try {
+            const calls = await fetchRecent('/calls', { user_id: sdr.id }, 2000);
+            cache[`calls_${sdr.id}`] = calls; cacheTime[`calls_${sdr.id}`] = Date.now();
+            console.log(`  pre-warm calls ${name}: ${calls.length}`);
+          } catch (e) { console.error(`pre-warm calls FAILED ${name}:`, e.message); }
+          try {
+            const prosp = await fetchRecent('/prospections', { user_id: sdr.id }, 2000);
+            cache[`prosp_${sdr.id}`] = prosp; cacheTime[`prosp_${sdr.id}`] = Date.now();
+            console.log(`  pre-warm prosp ${name}: ${prosp.length}`);
+          } catch (e) { console.error(`pre-warm prosp FAILED ${name}:`, e.message); }
+          try {
+            const acts = await fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 1000);
+            cache[`acts_${sdr.id}`] = acts; cacheTime[`acts_${sdr.id}`] = Date.now();
+            console.log(`  pre-warm acts  ${name}: ${acts.length}`);
+          } catch (e) { console.error(`pre-warm acts FAILED ${name}:`, e.message); }
+        }));
+        if (i + 2 < sorted.length) await sleep(800); // delay between batches
       }
       console.log('Data pre-loaded! Dashboard ready.');
     } catch (e) { console.error('Pre-load error:', e.message); }
