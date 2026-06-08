@@ -65,7 +65,7 @@ async function fetchAllFrom(endpoint, extraParams = {}, startOffset = 0, maxReco
   let start = startOffset;
   const limit = 100;
   while (results.length < maxRecords) {
-    let retries = 3;
+    let retries = 5;
     let resp;
     while (retries > 0) {
       try {
@@ -73,7 +73,9 @@ async function fetchAllFrom(endpoint, extraParams = {}, startOffset = 0, maxReco
         break;
       } catch (e) {
         if (e.response && e.response.status === 429) {
-          await sleep(2000);
+          const waitMs = (6 - retries) * 3000; // backoff: 3s, 6s, 9s, 12s, 15s
+          console.log(`429 em ${endpoint} — aguardando ${waitMs}ms (retry ${6-retries}/5)`);
+          await sleep(waitMs);
           retries--;
         } else throw e;
       }
@@ -85,7 +87,7 @@ async function fetchAllFrom(endpoint, extraParams = {}, startOffset = 0, maxReco
     results.push(...page);
     if (!data.next || results.length >= maxRecords) break;
     start += limit;
-    await sleep(150);
+    await sleep(300); // aumentado de 150ms para 300ms
   }
   return results.slice(0, maxRecords);
 }
@@ -212,20 +214,25 @@ app.get('/api/dashboard', async (req, res) => {
 
     const allActivities = [];
 
-    // Fetch sequentially to avoid rate limiting
+    // Fetch sequentially with inter-SDR delay to avoid rate limiting
     for (const sdr of sdrs.slice(0, 20)) {
+      const name = sdr.name || sdr.email;
       try {
         const calls = await cached(`calls_${sdr.id}`, () => fetchRecent('/calls', { user_id: sdr.id }, 2000));
-        allCalls.push(...calls.map(c => ({ ...c, sdr_id: sdr.id, sdr_name: sdr.name || sdr.email })));
-      } catch (e) { console.error(`calls fetch failed for ${sdr.id}:`, e.message); }
+        allCalls.push(...calls.map(c => ({ ...c, sdr_id: sdr.id, sdr_name: name })));
+        console.log(`  calls ${name}: ${calls.length}`);
+      } catch (e) { console.error(`calls FAILED ${name}:`, e.message); }
       try {
         const prosp = await cached(`prosp_${sdr.id}`, () => fetchRecent('/prospections', { user_id: sdr.id }, 2000));
-        allProspections.push(...prosp.map(p => ({ ...p, sdr_id: sdr.id, sdr_name: sdr.name || sdr.email })));
-      } catch (e) { console.error(`prosp fetch FAILED for ${sdr.id}:`, e.message); }
+        allProspections.push(...prosp.map(p => ({ ...p, sdr_id: sdr.id, sdr_name: name })));
+        console.log(`  prosp ${name}: ${prosp.length}`);
+      } catch (e) { console.error(`prosp FAILED ${name}:`, e.message); }
       try {
         const acts = await cached(`acts_${sdr.id}`, () => fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 1000));
-        allActivities.push(...acts.map(a => ({ ...a, sdr_id: sdr.id, sdr_name: sdr.name || sdr.email })));
-      } catch (e) { console.error(`acts fetch failed for ${sdr.id}:`, e.message); }
+        allActivities.push(...acts.map(a => ({ ...a, sdr_id: sdr.id, sdr_name: name })));
+        console.log(`  acts  ${name}: ${acts.length}`);
+      } catch (e) { console.error(`acts FAILED ${name}:`, e.message); }
+      await sleep(500); // 500ms entre SDRs para evitar rate limit
     }
 
     const filteredCalls = allCalls.filter(c => new Date(c.date) >= cutoff);
@@ -317,18 +324,20 @@ app.get('/api/inbound', async (req, res) => {
     const allCalls = [], allProsp = [], allActs = [];
 
     for (const sdr of inboundSDRs) {
+      const name = sdr.name || sdr.email;
       try {
         const calls = await cached(`calls_${sdr.id}`, () => fetchRecent('/calls', { user_id: sdr.id }, 2000));
-        allCalls.push(...calls.map(c => ({ ...c, _sdr_id: sdr.id, _sdr_name: sdr.name || sdr.email, _team: sdr.team_name })));
-      } catch (e) { console.error(`inbound calls ${sdr.id}:`, e.message); }
+        allCalls.push(...calls.map(c => ({ ...c, _sdr_id: sdr.id, _sdr_name: name, _team: sdr.team_name })));
+      } catch (e) { console.error(`inbound calls ${name}:`, e.message); }
       try {
         const prosp = await cached(`prosp_${sdr.id}`, () => fetchRecent('/prospections', { user_id: sdr.id }, 2000));
-        allProsp.push(...prosp.map(p => ({ ...p, _sdr_id: sdr.id, _sdr_name: sdr.name || sdr.email, _team: sdr.team_name })));
-      } catch (e) { console.error(`inbound prosp ${sdr.id}:`, e.message); }
+        allProsp.push(...prosp.map(p => ({ ...p, _sdr_id: sdr.id, _sdr_name: name, _team: sdr.team_name })));
+      } catch (e) { console.error(`inbound prosp ${name}:`, e.message); }
       try {
         const acts = await cached(`acts_${sdr.id}`, () => fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 1000));
-        allActs.push(...acts.map(a => ({ ...a, _sdr_id: sdr.id, _sdr_name: sdr.name || sdr.email, _team: sdr.team_name })));
-      } catch (e) { console.error(`inbound acts ${sdr.id}:`, e.message); }
+        allActs.push(...acts.map(a => ({ ...a, _sdr_id: sdr.id, _sdr_name: name, _team: sdr.team_name })));
+      } catch (e) { console.error(`inbound acts ${name}:`, e.message); }
+      await sleep(500);
     }
 
     const fCalls = allCalls.filter(c => new Date(c.date) >= cutoff);
@@ -449,18 +458,23 @@ app.listen(PORT, () => {
       cache['users'] = ud.data.filter(u => u.email && u.email.includes('v4company'));
       cacheTime['users'] = Date.now();
       for (const sdr of sdrs.slice(0, 20)) {
+        const name = sdr.name || sdr.email;
         try {
           const calls = await fetchRecent('/calls', { user_id: sdr.id }, 2000);
           cache[`calls_${sdr.id}`] = calls; cacheTime[`calls_${sdr.id}`] = Date.now();
-        } catch (_) {}
+          console.log(`  pre-warm calls ${name}: ${calls.length}`);
+        } catch (e) { console.error(`pre-warm calls FAILED ${name}:`, e.message); }
         try {
           const prosp = await fetchRecent('/prospections', { user_id: sdr.id }, 2000);
           cache[`prosp_${sdr.id}`] = prosp; cacheTime[`prosp_${sdr.id}`] = Date.now();
-        } catch (_) {}
+          console.log(`  pre-warm prosp ${name}: ${prosp.length}`);
+        } catch (e) { console.error(`pre-warm prosp FAILED ${name}:`, e.message); }
         try {
           const acts = await fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 1000);
           cache[`acts_${sdr.id}`] = acts; cacheTime[`acts_${sdr.id}`] = Date.now();
-        } catch (_) {}
+          console.log(`  pre-warm acts  ${name}: ${acts.length}`);
+        } catch (e) { console.error(`pre-warm acts FAILED ${name}:`, e.message); }
+        await sleep(500); // inter-SDR delay
       }
       console.log('Data pre-loaded! Dashboard ready.');
     } catch (e) { console.error('Pre-load error:', e.message); }
