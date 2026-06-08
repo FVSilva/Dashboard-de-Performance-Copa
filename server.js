@@ -215,15 +215,15 @@ app.get('/api/dashboard', async (req, res) => {
     // Fetch sequentially to avoid rate limiting
     for (const sdr of sdrs.slice(0, 20)) {
       try {
-        const calls = await cached(`calls_${sdr.id}`, () => fetchAll('/calls', { user_id: sdr.id }, 500));
+        const calls = await cached(`calls_${sdr.id}`, () => fetchRecent('/calls', { user_id: sdr.id }, 2000));
         allCalls.push(...calls.map(c => ({ ...c, sdr_id: sdr.id, sdr_name: sdr.name || sdr.email })));
       } catch (e) { console.error(`calls fetch failed for ${sdr.id}:`, e.message); }
       try {
-        const prosp = await cached(`prosp_${sdr.id}`, () => fetchAll('/prospections', { user_id: sdr.id }, 700));
+        const prosp = await cached(`prosp_${sdr.id}`, () => fetchRecent('/prospections', { user_id: sdr.id }, 2000));
         allProspections.push(...prosp.map(p => ({ ...p, sdr_id: sdr.id, sdr_name: sdr.name || sdr.email })));
       } catch (e) { console.error(`prosp fetch FAILED for ${sdr.id}:`, e.message); }
       try {
-        const acts = await cached(`acts_${sdr.id}`, () => fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 500));
+        const acts = await cached(`acts_${sdr.id}`, () => fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 1000));
         allActivities.push(...acts.map(a => ({ ...a, sdr_id: sdr.id, sdr_name: sdr.name || sdr.email })));
       } catch (e) { console.error(`acts fetch failed for ${sdr.id}:`, e.message); }
     }
@@ -318,15 +318,15 @@ app.get('/api/inbound', async (req, res) => {
 
     for (const sdr of inboundSDRs) {
       try {
-        const calls = await cached(`calls_${sdr.id}`, () => fetchAll('/calls', { user_id: sdr.id }, 500));
+        const calls = await cached(`calls_${sdr.id}`, () => fetchRecent('/calls', { user_id: sdr.id }, 2000));
         allCalls.push(...calls.map(c => ({ ...c, _sdr_id: sdr.id, _sdr_name: sdr.name || sdr.email, _team: sdr.team_name })));
       } catch (e) { console.error(`inbound calls ${sdr.id}:`, e.message); }
       try {
-        const prosp = await cached(`prosp_${sdr.id}`, () => fetchAll('/prospections', { user_id: sdr.id }, 700));
+        const prosp = await cached(`prosp_${sdr.id}`, () => fetchRecent('/prospections', { user_id: sdr.id }, 2000));
         allProsp.push(...prosp.map(p => ({ ...p, _sdr_id: sdr.id, _sdr_name: sdr.name || sdr.email, _team: sdr.team_name })));
       } catch (e) { console.error(`inbound prosp ${sdr.id}:`, e.message); }
       try {
-        const acts = await cached(`acts_${sdr.id}`, () => fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 500));
+        const acts = await cached(`acts_${sdr.id}`, () => fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 1000));
         allActs.push(...acts.map(a => ({ ...a, _sdr_id: sdr.id, _sdr_name: sdr.name || sdr.email, _team: sdr.team_name })));
       } catch (e) { console.error(`inbound acts ${sdr.id}:`, e.message); }
     }
@@ -450,15 +450,15 @@ app.listen(PORT, () => {
       cacheTime['users'] = Date.now();
       for (const sdr of sdrs.slice(0, 20)) {
         try {
-          const calls = await fetchAll('/calls', { user_id: sdr.id }, 500);
+          const calls = await fetchRecent('/calls', { user_id: sdr.id }, 2000);
           cache[`calls_${sdr.id}`] = calls; cacheTime[`calls_${sdr.id}`] = Date.now();
         } catch (_) {}
         try {
-          const prosp = await fetchAll('/prospections', { user_id: sdr.id }, 700);
+          const prosp = await fetchRecent('/prospections', { user_id: sdr.id }, 2000);
           cache[`prosp_${sdr.id}`] = prosp; cacheTime[`prosp_${sdr.id}`] = Date.now();
         } catch (_) {}
         try {
-          const acts = await fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 500);
+          const acts = await fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 1000);
           cache[`acts_${sdr.id}`] = acts; cacheTime[`acts_${sdr.id}`] = Date.now();
         } catch (_) {}
       }
