@@ -47,9 +47,63 @@ async function fetchAll(endpoint, extraParams = {}, maxRecords = 1000) {
   return results;
 }
 
-// Fetch the MOST RECENT records — API returns oldest-first so we jump to the end
+// Retorna o campo de data do registro dependendo do endpoint
+function getRecordDate(record) {
+  return record.date || record.created_date || record.execution_date || record.available_from || record.updated;
+}
+
+// fetchSince: busca TODOS os registros desde cutoffDate
+// API retorna oldest-first — varremos do fim para o início até atingir a data de corte
+async function fetchSince(endpoint, extraParams = {}, cutoffDate) {
+  let peek;
+  try {
+    peek = await meetime.get(endpoint, { params: { limit: 1, start: 0, ...extraParams } });
+  } catch (e) { return []; }
+
+  const total = peek.data.totalItems || 0;
+  if (!total) return [];
+
+  const limit = 100;
+  const results = [];
+  let start = Math.max(0, total - limit);
+
+  while (true) {
+    let retries = 5, resp;
+    while (retries > 0) {
+      try {
+        resp = await meetime.get(endpoint, { params: { limit, start, ...extraParams } });
+        break;
+      } catch (e) {
+        if (e.response && e.response.status === 429) {
+          const waitMs = (6 - retries) * 3000;
+          console.log(`429 em ${endpoint} — aguardando ${waitMs}ms`);
+          await sleep(waitMs);
+          retries--;
+        } else throw e;
+      }
+    }
+    if (!resp) break;
+
+    const page = resp.data.data || [];
+    if (!page.length) break;
+
+    // Filtra só registros dentro do período
+    const inPeriod = page.filter(r => new Date(getRecordDate(r)) >= cutoffDate);
+    results.unshift(...inPeriod); // mantém ordem cronológica
+
+    // Se toda a página é mais antiga que o cutoff, podemos parar
+    const allOld = page.every(r => new Date(getRecordDate(r)) < cutoffDate);
+    if (allOld || start === 0) break;
+
+    start = Math.max(0, start - limit);
+    await sleep(300);
+  }
+
+  return results;
+}
+
+// fetchRecent: mantido para compatibilidade (pre-warm usa limite menor para atividades)
 async function fetchRecent(endpoint, extraParams = {}, maxRecords = 500) {
-  // Peek to get totalItems
   let peek;
   try {
     peek = await meetime.get(endpoint, { params: { limit: 1, start: 0, ...extraParams } });
@@ -65,16 +119,14 @@ async function fetchAllFrom(endpoint, extraParams = {}, startOffset = 0, maxReco
   let start = startOffset;
   const limit = 100;
   while (results.length < maxRecords) {
-    let retries = 5;
-    let resp;
+    let retries = 5, resp;
     while (retries > 0) {
       try {
         resp = await meetime.get(endpoint, { params: { limit, start, ...extraParams } });
         break;
       } catch (e) {
         if (e.response && e.response.status === 429) {
-          const waitMs = (6 - retries) * 3000; // backoff: 3s, 6s, 9s, 12s, 15s
-          console.log(`429 em ${endpoint} — aguardando ${waitMs}ms (retry ${6-retries}/5)`);
+          const waitMs = (6 - retries) * 3000;
           await sleep(waitMs);
           retries--;
         } else throw e;
@@ -87,7 +139,7 @@ async function fetchAllFrom(endpoint, extraParams = {}, startOffset = 0, maxReco
     results.push(...page);
     if (!data.next || results.length >= maxRecords) break;
     start += limit;
-    await sleep(300); // aumentado de 150ms para 300ms
+    await sleep(300);
   }
   return results.slice(0, maxRecords);
 }
@@ -243,25 +295,24 @@ app.get('/api/dashboard', async (req, res) => {
 
     const allActivities = [];
 
-    // Fetch sequentially with inter-SDR delay to avoid rate limiting
+    // Cutoff de 6 meses para o cache — filtra pelo período pedido depois
+    const cutoff6m = new Date(); cutoff6m.setMonth(cutoff6m.getMonth() - 6);
+
     for (const sdr of sdrs.slice(0, 20)) {
       const name = sdr.name || sdr.email;
       try {
-        const calls = await cached(`calls_${sdr.id}`, () => fetchRecent('/calls', { user_id: sdr.id }, 2000));
+        const calls = await cached(`calls_${sdr.id}`, () => fetchSince('/calls', { user_id: sdr.id }, cutoff6m));
         allCalls.push(...calls.map(c => ({ ...c, sdr_id: sdr.id, sdr_name: name })));
-        console.log(`  calls ${name}: ${calls.length}`);
       } catch (e) { console.error(`calls FAILED ${name}:`, e.message); }
       try {
-        const prosp = await cached(`prosp_${sdr.id}`, () => fetchRecent('/prospections', { user_id: sdr.id }, 2000));
+        const prosp = await cached(`prosp_${sdr.id}`, () => fetchSince('/prospections', { user_id: sdr.id }, cutoff6m));
         allProspections.push(...prosp.map(p => ({ ...p, sdr_id: sdr.id, sdr_name: name })));
-        console.log(`  prosp ${name}: ${prosp.length}`);
       } catch (e) { console.error(`prosp FAILED ${name}:`, e.message); }
       try {
-        const acts = await cached(`acts_${sdr.id}`, () => fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 1000));
+        const acts = await cached(`acts_${sdr.id}`, () => fetchSince('/prospections/activities', { assigned_to_id: sdr.id }, cutoff6m));
         allActivities.push(...acts.map(a => ({ ...a, sdr_id: sdr.id, sdr_name: name })));
-        console.log(`  acts  ${name}: ${acts.length}`);
       } catch (e) { console.error(`acts FAILED ${name}:`, e.message); }
-      await sleep(500); // 500ms entre SDRs para evitar rate limit
+      await sleep(500);
     }
 
     const filteredCalls = allCalls.filter(c => new Date(c.date) >= cutoff);
@@ -356,18 +407,20 @@ app.get('/api/inbound', async (req, res) => {
 
     const allCalls = [], allProsp = [], allActs = [];
 
+    const cutoff6m_i = new Date(); cutoff6m_i.setMonth(cutoff6m_i.getMonth() - 6);
+
     for (const sdr of inboundSDRs) {
       const name = sdr.name || sdr.email;
       try {
-        const calls = await cached(`calls_${sdr.id}`, () => fetchRecent('/calls', { user_id: sdr.id }, 2000));
+        const calls = await cached(`calls_${sdr.id}`, () => fetchSince('/calls', { user_id: sdr.id }, cutoff6m_i));
         allCalls.push(...calls.map(c => ({ ...c, _sdr_id: sdr.id, _sdr_name: name, _team: sdr.team_name })));
       } catch (e) { console.error(`inbound calls ${name}:`, e.message); }
       try {
-        const prosp = await cached(`prosp_${sdr.id}`, () => fetchRecent('/prospections', { user_id: sdr.id }, 2000));
+        const prosp = await cached(`prosp_${sdr.id}`, () => fetchSince('/prospections', { user_id: sdr.id }, cutoff6m_i));
         allProsp.push(...prosp.map(p => ({ ...p, _sdr_id: sdr.id, _sdr_name: name, _team: sdr.team_name })));
       } catch (e) { console.error(`inbound prosp ${name}:`, e.message); }
       try {
-        const acts = await cached(`acts_${sdr.id}`, () => fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 1000));
+        const acts = await cached(`acts_${sdr.id}`, () => fetchSince('/prospections/activities', { assigned_to_id: sdr.id }, cutoff6m_i));
         allActs.push(...acts.map(a => ({ ...a, _sdr_id: sdr.id, _sdr_name: name, _team: sdr.team_name })));
       } catch (e) { console.error(`inbound acts ${name}:`, e.message); }
       await sleep(500);
@@ -510,21 +563,28 @@ async function refreshAllSDRs(label = 'refresh') {
     cache['users'] = allUsers;
     cacheTime['users'] = Date.now();
 
+    // Cutoff: busca dados dos últimos 6 meses (cobre todos os períodos do dashboard)
+    const cutoff6m = new Date(); cutoff6m.setMonth(cutoff6m.getMonth() - 6);
+
+    // Processa 2 SDRs por vez para não sobrecarregar a API
     for (let i = 0; i < sdrs.length; i += 2) {
       const batch = sdrs.slice(i, i + 2);
       await Promise.all(batch.map(async sdr => {
         const name = sdr.name || sdr.email;
         try {
-          const calls = await fetchRecent('/calls', { user_id: sdr.id }, 2000);
+          const calls = await fetchSince('/calls', { user_id: sdr.id }, cutoff6m);
           cache[`calls_${sdr.id}`] = calls; cacheTime[`calls_${sdr.id}`] = Date.now();
+          console.log(`  [${label}] calls ${name}: ${calls.length}`);
         } catch (e) { console.error(`[${label}] calls FAILED ${name}:`, e.message); }
         try {
-          const prosp = await fetchRecent('/prospections', { user_id: sdr.id }, 2000);
+          const prosp = await fetchSince('/prospections', { user_id: sdr.id }, cutoff6m);
           cache[`prosp_${sdr.id}`] = prosp; cacheTime[`prosp_${sdr.id}`] = Date.now();
+          console.log(`  [${label}] prosp ${name}: ${prosp.length}`);
         } catch (e) { console.error(`[${label}] prosp FAILED ${name}:`, e.message); }
         try {
-          const acts = await fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, 1000);
+          const acts = await fetchSince('/prospections/activities', { assigned_to_id: sdr.id }, cutoff6m);
           cache[`acts_${sdr.id}`] = acts; cacheTime[`acts_${sdr.id}`] = Date.now();
+          console.log(`  [${label}] acts  ${name}: ${acts.length}`);
         } catch (e) { console.error(`[${label}] acts FAILED ${name}:`, e.message); }
       }));
       if (i + 2 < sdrs.length) await sleep(800);
