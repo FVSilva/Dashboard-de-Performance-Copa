@@ -221,6 +221,11 @@ app.get('/api/cadences', async (req, res) => {
 app.get('/api/dashboard', async (req, res) => {
   try {
     const { months = 3 } = req.query;
+    // Serve computed result from cache if fresh
+    const resultKey = `dashboard_result_${months}`;
+    if (cache[resultKey] && Date.now() - cacheTime[resultKey] < CACHE_TTL) {
+      return res.json(cache[resultKey]);
+    }
     const cutoff = new Date();
     cutoff.setMonth(cutoff.getMonth() - parseInt(months));
 
@@ -319,10 +324,10 @@ app.get('/api/dashboard', async (req, res) => {
       };
     }
 
-    // Monthly trends (last 6 months)
     const trends = buildMonthlyTrends(filteredCalls, filteredProsp, filteredActs, parseInt(months));
-
-    res.json({ sdrs: Object.values(sdrMetrics), trends, totalSDRs: sdrs.length });
+    const result = { sdrs: Object.values(sdrMetrics), trends, totalSDRs: sdrs.length };
+    cache[resultKey] = result; cacheTime[resultKey] = Date.now();
+    res.json(result);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -333,6 +338,10 @@ app.get('/api/dashboard', async (req, res) => {
 app.get('/api/inbound', async (req, res) => {
   try {
     const { months = 3 } = req.query;
+    const inboundKey = `inbound_result_${months}`;
+    if (cache[inboundKey] && Date.now() - cacheTime[inboundKey] < CACHE_TTL) {
+      return res.json(cache[inboundKey]);
+    }
     const cutoff = new Date();
     cutoff.setMonth(cutoff.getMonth() - parseInt(months));
 
@@ -423,7 +432,9 @@ app.get('/api/inbound', async (req, res) => {
     }
 
     const trends = buildMonthlyTrends(fCalls, fProsp, fActs, parseInt(months));
-    res.json({ sdrs: Object.values(sdrMetrics), trends, teams: [...new Set(inboundSDRs.map(s => s.team_name).filter(Boolean))] });
+    const inboundResult = { sdrs: Object.values(sdrMetrics), trends, teams: [...new Set(inboundSDRs.map(s => s.team_name).filter(Boolean))] };
+    cache[inboundKey] = inboundResult; cacheTime[inboundKey] = Date.now();
+    res.json(inboundResult);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -520,6 +531,73 @@ async function refreshAllSDRs(label = 'refresh') {
       if (i + 2 < sdrs.length) await sleep(800);
     }
 
+    // Pré-computa resultados agregados para os períodos mais comuns
+    // Isso garante que a 1ª requisição HTTP seja instantânea
+    for (const months of [1, 3, 6]) {
+      try {
+        const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - months);
+        const fCalls = []; const fProsp = []; const fActs = [];
+        const sdrMetrics = {};
+        for (const sdr of sdrs) {
+          const id = sdr.id; const name = sdr.name || sdr.email;
+          const calls  = (cache[`calls_${id}`]  || []).filter(c => new Date(c.date) >= cutoff);
+          const prosp   = (cache[`prosp_${id}`]  || []).filter(p => new Date(p.created_date) >= cutoff);
+          const actDate = a => a.execution_date || a.available_from || a.updated;
+          const acts    = (cache[`acts_${id}`]   || []).filter(a => new Date(actDate(a)) >= cutoff);
+          fCalls.push(...calls.map(c=>({...c,sdr_id:id,sdr_name:name})));
+          fProsp.push(...prosp.map(p=>({...p,sdr_id:id,sdr_name:name})));
+          fActs.push(...acts.map(a=>({...a,sdr_id:id,sdr_name:name})));
+          const conn = calls.filter(c=>c.status==='CONNECTED');
+          const mean = calls.filter(c=>c.output==='MEANINGFUL');
+          const dur  = conn.reduce((s,c)=>s+(c.connected_duration_seconds||0),0);
+          const won  = prosp.filter(p=>p.status==='WON');
+          const lost = prosp.filter(p=>p.status==='LOST');
+          const active = prosp.filter(p=>p.status==='EXECUTING'||p.status==='WAITING');
+          const short  = conn.filter(c=>(c.connected_duration_seconds||0)<=10);
+          const emails = acts.filter(a=>a.type==='E_MAIL');
+          const done   = acts.filter(a=>a.status==='FINISHED');
+          sdrMetrics[id] = {
+            id, name, team: sdr.team_name,
+            calls: { total:calls.length, connected:conn.length, meaningful:mean.length, shortAbandons:short.length,
+              connectionRate: calls.length?+((conn.length/calls.length)*100).toFixed(1):0,
+              meaningfulRate: conn.length?+((mean.length/conn.length)*100).toFixed(1):0,
+              shortAbandonRate: conn.length?+((short.length/conn.length)*100).toFixed(1):0,
+              avgDuration: conn.length?Math.round(dur/conn.length):0, totalDuration:dur },
+            prospections: { total:prosp.length, converted:won.length, lost:lost.length, active:active.length,
+              conversionRate: prosp.length?+((won.length/prosp.length)*100).toFixed(1):0 },
+            activities: { total:acts.length, done:done.length,
+              emails:emails.length, emailsDone:emails.filter(a=>a.status==='FINISHED').length,
+              emailsPending:emails.filter(a=>a.status!=='FINISHED').length,
+              callsDone:acts.filter(a=>a.type==='CALL'&&a.status==='FINISHED').length,
+              callsPending:acts.filter(a=>a.type==='CALL'&&a.status!=='FINISHED').length,
+              whatsappDone:acts.filter(a=>a.type==='SOCIAL_POINT'&&a.status==='FINISHED').length,
+              whatsappPending:acts.filter(a=>a.type==='SOCIAL_POINT'&&a.status!=='FINISHED').length,
+              social:acts.filter(a=>a.type==='SOCIAL_POINT').length,
+              searches:acts.filter(a=>a.type==='SEARCH').length,
+              completionRate: acts.length?+((done.length/acts.length)*100).toFixed(1):0 }
+          };
+        }
+        const trends = buildMonthlyTrends(fCalls, fProsp, fActs, months);
+        const result = { sdrs: Object.values(sdrMetrics), trends, totalSDRs: sdrs.length };
+        cache[`dashboard_result_${months}`] = result; cacheTime[`dashboard_result_${months}`] = Date.now();
+
+        // Inbound
+        const inboundSDRs = sdrs.filter(s => s.team_name && s.team_name.toUpperCase().includes('INBOUND'));
+        const iSdrMetrics = {};
+        for (const sdr of inboundSDRs) {
+          const m = sdrMetrics[sdr.id];
+          if (m) iSdrMetrics[sdr.id] = { ...m,
+            prospections: { ...m.prospections, won:m.prospections.converted, wonRate:m.prospections.conversionRate, lostRate: m.prospections.total?+((m.prospections.lost/m.prospections.total)*100).toFixed(1):0 }
+          };
+        }
+        const iTrends = buildMonthlyTrends(
+          fCalls.filter(c=>inboundSDRs.some(s=>s.id===c.sdr_id)),
+          fProsp.filter(p=>inboundSDRs.some(s=>s.id===p.sdr_id)),
+          fActs.filter(a=>inboundSDRs.some(s=>s.id===a.sdr_id)), months);
+        cache[`inbound_result_${months}`] = { sdrs: Object.values(iSdrMetrics), trends: iTrends, teams:[...new Set(inboundSDRs.map(s=>s.team_name).filter(Boolean))] };
+        cacheTime[`inbound_result_${months}`] = Date.now();
+      } catch(e) { console.error(`[${label}] pré-cômputo ${months}m:`, e.message); }
+    }
     saveCacheToDisk();
     const mins = ((Date.now() - started) / 60000).toFixed(1);
     console.log(`[${label}] Dados atualizados em ${mins}min — ${sdrs.length} SDRs`);
