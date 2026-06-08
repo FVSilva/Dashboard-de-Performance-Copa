@@ -610,7 +610,7 @@ async function refreshAllSDRs(label = 'refresh') {
 // Load cache immediately on startup
 loadCacheFromDisk();
 
-const PORT = 4000;
+const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Dashboard running at http://localhost:${PORT}`);
 
