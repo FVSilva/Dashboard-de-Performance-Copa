@@ -854,9 +854,7 @@ async function loadDashboard() {
     document.getElementById('refresh-badge').textContent =
       `${dashData.sdrs.length} SDRs Outbound • ${(inboundData.sdrs||[]).length} Inbound • ${allCallsData.length.toLocaleString()} ligações`;
   } catch(e) {
-    console.error(e);
-    document.getElementById('loading-sub').textContent = '❌ ' + e.message;
-    setTimeout(() => document.getElementById('loading').style.display = 'none', 4000);
+    console.error('loadDashboard error:', e);
   } finally {
     clearInterval(statusInterval);
     document.getElementById('loading-bar').style.width = '100%';

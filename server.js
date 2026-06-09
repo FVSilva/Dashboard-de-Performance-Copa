@@ -244,7 +244,15 @@ app.get('/api/calls', async (req, res) => {
   try {
     const { user_id, months=3 } = req.query;
     const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth()-parseInt(months));
-    const calls = cache[`calls_${user_id}`] || [];
+    let calls = [];
+    if (user_id) {
+      calls = cache[`calls_${user_id}`] || [];
+    } else {
+      // Agrega calls de todos os SDRs
+      const usersData = cache['users'] || [];
+      const sdrs = usersData.filter(u => u.role==='SALESMAN' && u.active);
+      for (const s of sdrs) calls.push(...(cache[`calls_${s.id}`]||[]).map(c=>({...c,user_id:s.id})));
+    }
     res.json(calls.filter(c => new Date(c.date||0) >= cutoff));
   } catch(e) { res.status(500).json({error:e.message}); }
 });
