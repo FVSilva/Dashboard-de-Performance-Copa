@@ -1,720 +1,325 @@
 const express = require('express');
-const axios = require('axios');
-const cors = require('cors');
-const path = require('path');
+const axios   = require('axios');
+const cors    = require('cors');
+const path    = require('path');
+const fs      = require('fs');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-const API_KEY = '0vS9fN5LXMQhOrl8weUgvbLqAcFeF8YS';
+const API_KEY  = '0vS9fN5LXMQhOrl8weUgvbLqAcFeF8YS';
 const BASE_URL = 'https://api.meetime.com.br/v2';
+const CACHE_FILE = path.join(__dirname, '.cache.json');
+const CACHE_TTL  = 15 * 60 * 1000; // 15 min
 
-const meetime = axios.create({
-  baseURL: BASE_URL,
-  headers: { Authorization: API_KEY }
-});
-
+const meetime = axios.create({ baseURL: BASE_URL, headers: { Authorization: API_KEY } });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Fetch pages from a paginated endpoint with rate-limit handling
-async function fetchAll(endpoint, extraParams = {}, maxRecords = 1000) {
-  const results = [];
-  let start = 0;
-  const limit = 100;
-  while (true) {
-    let retries = 3;
-    let resp;
-    while (retries > 0) {
-      try {
-        resp = await meetime.get(endpoint, { params: { limit, start, ...extraParams } });
-        break;
-      } catch (e) {
-        if (e.response && e.response.status === 429) {
-          await sleep(2000);
-          retries--;
-        } else throw e;
-      }
-    }
-    if (!resp) break;
-    const data = resp.data;
-    results.push(...(data.data || []));
-    if (!data.next || results.length >= data.totalItems || results.length >= maxRecords) break;
-    start += limit;
-    await sleep(150);
-  }
-  return results;
-}
-
-// Retorna o campo de data do registro
-function getRecordDate(r) {
-  return r.date || r.created_date || r.execution_date || r.available_from || r.updated;
-}
-
-// Faz uma requisição com retry em 429 e ECONNRESET
-async function apiGet(endpoint, params) {
-  let retries = 5;
-  while (retries > 0) {
-    try {
-      return await meetime.get(endpoint, { params });
-    } catch (e) {
-      const is429 = e.response && e.response.status === 429;
-      const isReset = e.code === 'ECONNRESET' || e.code === 'ETIMEDOUT';
-      if (is429 || isReset) {
-        const waitMs = (6 - retries) * 3000;
-        console.log(`${e.code || 429} em ${endpoint} — aguardando ${waitMs}ms`);
-        await sleep(waitMs);
-        retries--;
-      } else throw e;
-    }
-  }
-  throw new Error(`Falhou após 5 tentativas: ${endpoint}`);
-}
-
-// ─── SYNC INCREMENTAL ──────────────────────────────────────────────────────────
-// Guarda quantos registros cada SDR/endpoint tinha no último sync.
-// Na próxima vez, só busca os novos (delta). Resultado: de 80 páginas para 1.
-// ──────────────────────────────────────────────────────────────────────────────
-
-// Gera chaves consistentes com o restante do código
-function cacheKeys(endpoint, params) {
-  const id = params.user_id || params.assigned_to_id || 'all';
-  if (endpoint === '/calls')                    return { data: `calls_${id}`,     meta: `meta_calls_${id}` };
-  if (endpoint === '/prospections')             return { data: `prosp_${id}`,     meta: `meta_prosp_${id}` };
-  if (endpoint === '/prospections/activities')  return { data: `acts_${id}`,      meta: `meta_acts_${id}` };
-  return { data: `data_${endpoint}_${id}`, meta: `meta_${endpoint}_${id}` };
-}
-
-async function syncEndpoint(endpoint, extraParams, cutoff6m) {
-  const { data: dataKey, meta: mk } = cacheKeys(endpoint, extraParams);
-  const meta = cache[mk] || { fetchedTotal: 0 };
-  const stored = cache[dataKey] || [];
-
-  // Peek para saber total atual
-  const peek = await apiGet(endpoint, { limit: 1, start: 0, ...extraParams });
-  const currentTotal = peek.data.totalItems || 0;
-  if (!currentTotal) return stored;
-
-  if (meta.fetchedTotal === 0) {
-    // --- PRIMEIRA VEZ: busca tudo desde 6 meses atrás (fetchSince) ---
-    console.log(`    sync inicial ${endpoint} (total=${currentTotal})...`);
-    const limit = 100;
-    const results = [];
-    let start = Math.max(0, currentTotal - limit);
-
-    while (true) {
-      const resp = await apiGet(endpoint, { limit, start, ...extraParams });
-      const page = resp.data.data || [];
-      if (!page.length) break;
-
-      const inPeriod = page.filter(r => new Date(getRecordDate(r)) >= cutoff6m);
-      results.unshift(...inPeriod);
-
-      if (page.every(r => new Date(getRecordDate(r)) < cutoff6m) || start === 0) break;
-      start = Math.max(0, start - limit);
-      await sleep(300);
-    }
-
-    cache[dataKey] = results;
-    cache[mk] = { fetchedTotal: currentTotal };
-    return results;
-
-  } else if (currentTotal > meta.fetchedTotal) {
-    // --- DELTA: só busca os registros novos ---
-    const deltaCount = currentTotal - meta.fetchedTotal;
-    console.log(`    delta ${endpoint}: +${deltaCount} novos registros`);
-
-    const newRecords = [];
-    let start = meta.fetchedTotal;
-    const limit = 100;
-
-    while (newRecords.length < deltaCount) {
-      const resp = await apiGet(endpoint, { limit, start, ...extraParams });
-      const page = resp.data.data || [];
-      if (!page.length) break;
-      newRecords.push(...page);
-      if (!resp.data.next || newRecords.length >= deltaCount) break;
-      start += limit;
-      await sleep(200);
-    }
-
-    const merged = [...stored, ...newRecords]
-      .filter(r => new Date(getRecordDate(r)) >= cutoff6m);
-
-    cache[dataKey] = merged;
-    cache[mk] = { fetchedTotal: currentTotal };
-
-  } else if (currentTotal < meta.fetchedTotal) {
-    // --- totalItems diminuiu (registros deletados/arquivados) — re-fetch completo ---
-    console.log(`    re-fetch ${endpoint}: total caiu ${meta.fetchedTotal}→${currentTotal}`);
-    cache[mk] = { fetchedTotal: 0 }; // reset para forçar sync inicial
-    return syncEndpoint(endpoint, extraParams, cutoff6m);
-    return merged;
-
-  } else {
-    // Sem novos registros
-    return stored;
-  }
-}
-
-async function fetchAllFrom(endpoint, extraParams = {}, startOffset = 0, maxRecords = 500) {
-  const results = [];
-  let start = startOffset;
-  const limit = 100;
-  while (results.length < maxRecords) {
-    let retries = 5, resp;
-    while (retries > 0) {
-      try {
-        resp = await meetime.get(endpoint, { params: { limit, start, ...extraParams } });
-        break;
-      } catch (e) {
-        if (e.response && e.response.status === 429) {
-          const waitMs = (6 - retries) * 3000;
-          await sleep(waitMs);
-          retries--;
-        } else throw e;
-      }
-    }
-    if (!resp) break;
-    const data = resp.data;
-    const page = data.data || [];
-    if (!page.length) break;
-    results.push(...page);
-    if (!data.next || results.length >= maxRecords) break;
-    start += limit;
-    await sleep(300);
-  }
-  return results.slice(0, maxRecords);
-}
-
-// Cache in memory (refresh every 15min)
-let cache = {};
-let cacheTime = {};
-const CACHE_TTL = 15 * 60 * 1000;
-
-const CACHE_FILE = path.join(__dirname, '.cache.json');
+// ─── IN-MEMORY CACHE ─────────────────────────────────────────────────────────
+let cache = {}, cacheTime = {};
 
 function saveCacheToDisk() {
-  try {
-    const snapshot = { cache, cacheTime, savedAt: Date.now() };
-    require('fs').writeFileSync(CACHE_FILE, JSON.stringify(snapshot));
-  } catch (e) { console.error('Cache save error:', e.message); }
+  try { fs.writeFileSync(CACHE_FILE, JSON.stringify({ cache, cacheTime, savedAt: Date.now() })); }
+  catch (e) { console.error('Cache save error:', e.message); }
 }
 
 function loadCacheFromDisk() {
   try {
-    if (!require('fs').existsSync(CACHE_FILE)) return;
-    const { cache: c, cacheTime: ct, savedAt } = JSON.parse(require('fs').readFileSync(CACHE_FILE, 'utf8'));
-    // Sempre carrega do disco (mesmo expirado) para servir dados imediatamente
-    // O auto-refresh em background vai atualizar com dados frescos
-    cache = c;
-    cacheTime = ct;
-    const ageMin = ((Date.now() - savedAt) / 60000).toFixed(0);
-    const fresh = Date.now() - savedAt < CACHE_TTL;
-    console.log(`Cache do disco: ${Object.keys(c).length} entradas, ${ageMin}min atrás ${fresh ? '✓ fresco' : '(desatualizado — refresh em andamento)'}`);
+    if (!fs.existsSync(CACHE_FILE)) return;
+    const { cache: c, cacheTime: ct, savedAt } = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+    cache = c; cacheTime = ct;
+    const age = Math.round((Date.now() - savedAt) / 60000);
+    console.log(`Cache do disco: ${Object.keys(c).length} entradas, ${age}min atrás`);
   } catch (e) { console.error('Cache load error:', e.message); }
 }
 
-async function cached(key, fn) {
-  const now = Date.now();
-  if (cache[key] && now - cacheTime[key] < CACHE_TTL) return cache[key];
-  cache[key] = await fn();
-  cacheTime[key] = now;
-  saveCacheToDisk();   // persist cache to disk after every update
-  return cache[key];
+// ─── API HELPERS ─────────────────────────────────────────────────────────────
+
+// Fetch with retry on 429 + ECONNRESET
+async function apiGet(endpoint, params) {
+  let retries = 5;
+  while (retries > 0) {
+    try { return await meetime.get(endpoint, { params }); }
+    catch (e) {
+      const retry = (e.response?.status === 429) || e.code === 'ECONNRESET' || e.code === 'ETIMEDOUT';
+      if (retry) { await sleep((6 - retries) * 2000); retries--; }
+      else throw e;
+    }
+  }
+  throw new Error('Max retries exceeded: ' + endpoint);
 }
 
-// GET /api/users - @v4company.com users only
-app.get('/api/users', async (req, res) => {
-  try {
-    const users = await cached('users', async () => {
-      const { data } = await meetime.get('/users');
-      return data.data.filter(u =>
-        u.email && (u.email.includes('v4company') || u.email.match(/v4company@copaenergia/))
-      );
-    });
-    res.json(users);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+// Fetch last N records (API is oldest-first, so we jump to the end)
+async function fetchRecent(endpoint, params, maxRecords) {
+  const peek = await apiGet(endpoint, { limit: 1, start: 0, ...params });
+  const total = peek.data.totalItems || 0;
+  if (!total) return [];
+
+  const results = [];
+  let start = Math.max(0, total - maxRecords);
+  const limit = 100;
+
+  while (results.length < maxRecords) {
+    const resp = await apiGet(endpoint, { limit, start, ...params });
+    const page = resp.data.data || [];
+    if (!page.length) break;
+    results.push(...page);
+    if (!resp.data.next || results.length >= maxRecords) break;
+    start += limit;
+    await sleep(250);
   }
-});
-
-// GET /api/calls?user_id=X&months=6
-app.get('/api/calls', async (req, res) => {
-  try {
-    const { user_id, months = 6 } = req.query;
-    const cacheKey = `calls_${user_id || 'all'}_${months}`;
-    const calls = await cached(cacheKey, async () => {
-      const params = {};
-      if (user_id) params.user_id = user_id;
-      return await fetchAll('/calls', params);
-    });
-
-    // Filter by months
-    const cutoff = new Date();
-    cutoff.setMonth(cutoff.getMonth() - parseInt(months));
-    const filtered = calls.filter(c => new Date(c.date) >= cutoff);
-    res.json(filtered);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// GET /api/prospections?user_id=X&months=6
-app.get('/api/prospections', async (req, res) => {
-  try {
-    const { user_id, months = 6 } = req.query;
-    const cacheKey = `prosp_${user_id || 'all'}_${months}`;
-    const items = await cached(cacheKey, async () => {
-      const params = {};
-      if (user_id) params.user_id = user_id;
-      return await fetchAll('/prospections', params);
-    });
-
-    const cutoff = new Date();
-    cutoff.setMonth(cutoff.getMonth() - parseInt(months));
-    const filtered = items.filter(p => new Date(p.created_date) >= cutoff);
-    res.json(filtered);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// GET /api/activities?user_id=X&months=6
-app.get('/api/activities', async (req, res) => {
-  try {
-    const { user_id, months = 6 } = req.query;
-    const cacheKey = `acts_${user_id || 'all'}_${months}`;
-    const items = await cached(cacheKey, async () => {
-      const params = {};
-      if (user_id) params.assigned_to_id = user_id;
-      return await fetchAll('/prospections/activities', params, 500);
-    });
-    const cutoff = new Date();
-    cutoff.setMonth(cutoff.getMonth() - parseInt(months));
-    res.json(items.filter(a => new Date(a.execution_date || a.available_from || a.updated) >= cutoff));
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// GET /api/cadences
-app.get('/api/cadences', async (req, res) => {
-  try {
-    const data = await cached('cadences', async () => {
-      const { data } = await meetime.get('/cadences');
-      return data.data;
-    });
-    res.json(data);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// GET /api/dashboard - aggregated metrics for all v4company SDRs
-app.get('/api/dashboard', async (req, res) => {
-  try {
-    const { months = 3 } = req.query;
-    // Serve computed result from cache if fresh
-    const resultKey = `dashboard_result_${months}`;
-    if (cache[resultKey] && Date.now() - cacheTime[resultKey] < CACHE_TTL) {
-      return res.json(cache[resultKey]);
-    }
-    const cutoff = new Date();
-    cutoff.setMonth(cutoff.getMonth() - parseInt(months));
-
-    // Get v4company users
-    const usersRes = await cached('users', async () => {
-      const { data } = await meetime.get('/users');
-      return data.data.filter(u => u.email && u.email.includes('v4company'));
-    });
-
-    const sdrs = usersRes.filter(u => u.role === 'SALESMAN' && u.active);
-    const sdrIds = sdrs.map(u => u.id);
-
-    // Fetch calls for all SDRs in parallel (batched)
-    const allCalls = [];
-    const allProspections = [];
-
-    const allActivities = [];
-
-    // Cutoff de 6 meses para o cache — filtra pelo período pedido depois
-    const cutoff6m = new Date(); cutoff6m.setMonth(cutoff6m.getMonth() - 6);
-
-    for (const sdr of sdrs.slice(0, 20)) {
-      const name = sdr.name || sdr.email;
-      try {
-        const calls = await cached(`calls_${sdr.id}`, () => fetchSince('/calls', { user_id: sdr.id }, cutoff6m));
-        allCalls.push(...calls.map(c => ({ ...c, sdr_id: sdr.id, sdr_name: name })));
-      } catch (e) { console.error(`calls FAILED ${name}:`, e.message); }
-      try {
-        const prosp = await cached(`prosp_${sdr.id}`, () => fetchSince('/prospections', { user_id: sdr.id }, cutoff6m));
-        allProspections.push(...prosp.map(p => ({ ...p, sdr_id: sdr.id, sdr_name: name })));
-      } catch (e) { console.error(`prosp FAILED ${name}:`, e.message); }
-      try {
-        const acts = await cached(`acts_${sdr.id}`, () => fetchSince('/prospections/activities', { assigned_to_id: sdr.id }, cutoff6m));
-        allActivities.push(...acts.map(a => ({ ...a, sdr_id: sdr.id, sdr_name: name })));
-      } catch (e) { console.error(`acts FAILED ${name}:`, e.message); }
-      await sleep(500);
-    }
-
-    const filteredCalls = allCalls.filter(c => new Date(c.date) >= cutoff);
-    const filteredProsp = allProspections.filter(p => new Date(p.created_date) >= cutoff);
-    const actDateField = a => a.execution_date || a.available_from || a.updated;
-    const filteredActs = allActivities.filter(a => new Date(actDateField(a)) >= cutoff);
-
-    // Build per-SDR metrics
-    const sdrMetrics = {};
-    for (const sdr of sdrs.slice(0, 20)) {
-      const id = sdr.id;
-      const name = sdr.name || sdr.email;
-      const calls = filteredCalls.filter(c => c.sdr_id === id);
-      const prosp = filteredProsp.filter(p => p.sdr_id === id);
-      const acts = filteredActs.filter(a => a.sdr_id === id);
-
-      const connected = calls.filter(c => c.status === 'CONNECTED');
-      const meaningful = calls.filter(c => c.output === 'MEANINGFUL');
-      const totalDuration = connected.reduce((s, c) => s + (c.connected_duration_seconds || 0), 0);
-
-      const converted = prosp.filter(p => p.status === 'WON');
-      const lost = prosp.filter(p => p.status === 'LOST');
-      const active = prosp.filter(p => p.status === 'EXECUTING' || p.status === 'WAITING');
-
-      const emails = acts.filter(a => a.type === 'E_MAIL');
-      const emailsDone = emails.filter(a => a.status === 'FINISHED');
-      const socialActs = acts.filter(a => a.type === 'SOCIAL_POINT');
-      const searches = acts.filter(a => a.type === 'SEARCH');
-      const totalActs = acts.filter(a => a.status === 'FINISHED');
-
-      sdrMetrics[id] = {
-        id, name,
-        team: sdr.team_name,
-        calls: {
-          total: calls.length,
-          connected: connected.length,
-          meaningful: meaningful.length,
-          connectionRate: calls.length ? ((connected.length / calls.length) * 100).toFixed(1) : 0,
-          meaningfulRate: connected.length ? ((meaningful.length / connected.length) * 100).toFixed(1) : 0,
-          avgDuration: connected.length ? Math.round(totalDuration / connected.length) : 0,
-          totalDuration
-        },
-        prospections: {
-          total: prosp.length,
-          converted: converted.length,
-          lost: lost.length,
-          active: active.length,
-          conversionRate: prosp.length ? ((converted.length / prosp.length) * 100).toFixed(1) : 0
-        },
-        activities: {
-          total: acts.length,
-          done: totalActs.length,
-          emails: emails.length,
-          emailsDone: emailsDone.length,
-          social: socialActs.length,
-          searches: searches.length,
-          completionRate: acts.length ? ((totalActs.length / acts.length) * 100).toFixed(1) : 0
-        }
-      };
-    }
-
-    const trends = buildMonthlyTrends(filteredCalls, filteredProsp, filteredActs, parseInt(months));
-    const result = { sdrs: Object.values(sdrMetrics), trends, totalSDRs: sdrs.length };
-    cache[resultKey] = result; cacheTime[resultKey] = Date.now();
-    res.json(result);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// GET /api/inbound — métricas para SDRs com team_name contendo "INBOUND"
-app.get('/api/inbound', async (req, res) => {
-  try {
-    const { months = 3 } = req.query;
-    const inboundKey = `inbound_result_${months}`;
-    if (cache[inboundKey] && Date.now() - cacheTime[inboundKey] < CACHE_TTL) {
-      return res.json(cache[inboundKey]);
-    }
-    const cutoff = new Date();
-    cutoff.setMonth(cutoff.getMonth() - parseInt(months));
-
-    const usersRes = await cached('users', async () => {
-      const { data } = await meetime.get('/users');
-      return data.data.filter(u => u.email && u.email.includes('v4company'));
-    });
-
-    const inboundSDRs = usersRes.filter(u =>
-      u.role === 'SALESMAN' && u.active &&
-      u.team_name && u.team_name.toUpperCase().includes('INBOUND')
-    );
-
-    const allCalls = [], allProsp = [], allActs = [];
-
-    const cutoff6m_i = new Date(); cutoff6m_i.setMonth(cutoff6m_i.getMonth() - 6);
-
-    for (const sdr of inboundSDRs) {
-      const name = sdr.name || sdr.email;
-      try {
-        const calls = await cached(`calls_${sdr.id}`, () => fetchSince('/calls', { user_id: sdr.id }, cutoff6m_i));
-        allCalls.push(...calls.map(c => ({ ...c, _sdr_id: sdr.id, _sdr_name: name, _team: sdr.team_name })));
-      } catch (e) { console.error(`inbound calls ${name}:`, e.message); }
-      try {
-        const prosp = await cached(`prosp_${sdr.id}`, () => fetchSince('/prospections', { user_id: sdr.id }, cutoff6m_i));
-        allProsp.push(...prosp.map(p => ({ ...p, _sdr_id: sdr.id, _sdr_name: name, _team: sdr.team_name })));
-      } catch (e) { console.error(`inbound prosp ${name}:`, e.message); }
-      try {
-        const acts = await cached(`acts_${sdr.id}`, () => fetchSince('/prospections/activities', { assigned_to_id: sdr.id }, cutoff6m_i));
-        allActs.push(...acts.map(a => ({ ...a, _sdr_id: sdr.id, _sdr_name: name, _team: sdr.team_name })));
-      } catch (e) { console.error(`inbound acts ${name}:`, e.message); }
-      await sleep(500);
-    }
-
-    const fCalls = allCalls.filter(c => new Date(c.date) >= cutoff);
-    const fProsp  = allProsp.filter(p => new Date(p.created_date) >= cutoff);
-    const actDate = a => a.execution_date || a.available_from || a.updated;
-    const fActs   = allActs.filter(a => new Date(actDate(a)) >= cutoff);
-
-    const sdrMetrics = {};
-    for (const sdr of inboundSDRs) {
-      const id   = sdr.id;
-      const calls = fCalls.filter(c => c._sdr_id === id);
-      const prosp = fProsp.filter(p => p._sdr_id === id);
-      const acts  = fActs.filter(a => a._sdr_id === id);
-
-      const connected  = calls.filter(c => c.status === 'CONNECTED');
-      const meaningful = calls.filter(c => c.output === 'MEANINGFUL');
-      // Encerradas em até 10s = conectadas com duração <= 10s
-      const shortCalls = connected.filter(c => (c.connected_duration_seconds || 0) <= 10);
-      const totalDur   = connected.reduce((s, c) => s + (c.connected_duration_seconds || 0), 0);
-
-      const won    = prosp.filter(p => p.status === 'WON');
-      const lost   = prosp.filter(p => p.status === 'LOST');
-      const active = prosp.filter(p => p.status === 'EXECUTING' || p.status === 'WAITING');
-
-      const emailsDone    = acts.filter(a => a.type === 'E_MAIL'       && a.status === 'FINISHED');
-      const emailsPending = acts.filter(a => a.type === 'E_MAIL'       && a.status !== 'FINISHED');
-      const callsDone     = acts.filter(a => a.type === 'CALL'         && a.status === 'FINISHED');
-      const callsPending  = acts.filter(a => a.type === 'CALL'         && a.status !== 'FINISHED');
-      const waDone        = acts.filter(a => a.type === 'SOCIAL_POINT' && a.status === 'FINISHED');
-      const waPending     = acts.filter(a => a.type === 'SOCIAL_POINT' && a.status !== 'FINISHED');
-      const totalDone     = acts.filter(a => a.status === 'FINISHED');
-
-      sdrMetrics[id] = {
-        id, name: sdr.name || sdr.email, team: sdr.team_name,
-        calls: {
-          total: calls.length,
-          connected: connected.length,
-          meaningful: meaningful.length,
-          shortAbandons: shortCalls.length,
-          connectionRate:   calls.length      ? +((connected.length  / calls.length)      * 100).toFixed(1) : 0,
-          meaningfulRate:   connected.length  ? +((meaningful.length / connected.length)  * 100).toFixed(1) : 0,
-          shortAbandonRate: connected.length  ? +((shortCalls.length / connected.length)  * 100).toFixed(1) : 0,
-          avgDuration: connected.length ? Math.round(totalDur / connected.length) : 0
-        },
-        prospections: {
-          total: prosp.length, won: won.length, lost: lost.length, active: active.length,
-          wonRate:  prosp.length ? +((won.length  / prosp.length) * 100).toFixed(1) : 0,
-          lostRate: prosp.length ? +((lost.length / prosp.length) * 100).toFixed(1) : 0
-        },
-        activities: {
-          total: acts.length, done: totalDone.length,
-          completionRate: acts.length ? +((totalDone.length / acts.length) * 100).toFixed(1) : 0,
-          emailsDone:    emailsDone.length,    emailsPending: emailsPending.length,
-          callsDone:     callsDone.length,     callsPending:  callsPending.length,
-          whatsappDone:  waDone.length,        whatsappPending: waPending.length
-        }
-      };
-    }
-
-    const trends = buildMonthlyTrends(fCalls, fProsp, fActs, parseInt(months));
-    const inboundResult = { sdrs: Object.values(sdrMetrics), trends, teams: [...new Set(inboundSDRs.map(s => s.team_name).filter(Boolean))] };
-    cache[inboundKey] = inboundResult; cacheTime[inboundKey] = Date.now();
-    res.json(inboundResult);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-function buildMonthlyTrends(calls, prosp, acts, numMonths = 6) {
-  const months = {};
-  const now = new Date();
-  for (let i = numMonths - 1; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-    months[key] = { month: key, calls: 0, connected: 0, meaningful: 0, conversions: 0, prospections: 0, emails: 0, social: 0 };
-  }
-
-  for (const c of calls) {
-    const d = new Date(c.date);
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-    if (months[key]) {
-      months[key].calls++;
-      if (c.status === 'CONNECTED') months[key].connected++;
-      if (c.output === 'MEANINGFUL') months[key].meaningful++;
-    }
-  }
-
-  for (const p of prosp) {
-    const d = new Date(p.created_date);
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-    if (months[key]) {
-      months[key].prospections++;
-      if (p.status === 'WON') months[key].conversions++;
-    }
-  }
-
-  const actDate = a => a.execution_date || a.available_from || a.updated;
-  for (const a of (acts || [])) {
-    const d = new Date(actDate(a));
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-    if (months[key] && a.status === 'FINISHED') {
-      if (a.type === 'E_MAIL') months[key].emails++;
-      if (a.type === 'SOCIAL_POINT') months[key].social++;
-    }
-  }
-
-  return Object.values(months);
+  return results.slice(0, maxRecords);
 }
 
-// GET /api/cache-status — shows which SDRs are cached
-app.get('/api/cache-status', async (req, res) => {
-  const usersData = cache['users'] || [];
-  const sdrs = usersData.filter(u => u.role === 'SALESMAN' && u.active);
-  const status = sdrs.map(s => ({
-    id: s.id,
-    name: s.name || s.email,
-    calls: !!(cache[`calls_${s.id}`]?.length),
-    prosp: !!(cache[`prosp_${s.id}`] !== undefined),
-    acts:  !!(cache[`acts_${s.id}`]?.length)
-  }));
-  const ready = status.filter(s => s.calls && s.prosp && s.acts).length;
-  res.json({ ready, total: status.length, sdrs: status });
-});
+function getDate(r) { return r.date || r.created_date || r.execution_date || r.available_from || r.updated; }
 
-// Função central de refresh — usada pelo pre-warm e pelo auto-refresh
+// ─── SDR DATA REFRESH ────────────────────────────────────────────────────────
 let refreshing = false;
+
 async function refreshAllSDRs(label = 'refresh') {
-  if (refreshing) { console.log(`${label}: já em andamento, pulando`); return; }
+  if (refreshing) { console.log(`${label}: já em andamento`); return; }
   refreshing = true;
-  const started = Date.now();
+  const t0 = Date.now();
   try {
-    console.log(`[${label}] Iniciando atualização de dados...`);
+    console.log(`[${label}] iniciando...`);
     const { data: ud } = await meetime.get('/users');
     const allUsers = ud.data.filter(u => u.email && u.email.includes('v4company'));
     const sdrs = allUsers.filter(u => u.role === 'SALESMAN' && u.active).slice(0, 20);
-    cache['users'] = allUsers;
-    cacheTime['users'] = Date.now();
+    cache['users'] = allUsers; cacheTime['users'] = Date.now();
 
-    const cutoff6m = new Date(); cutoff6m.setMonth(cutoff6m.getMonth() - 6);
+    // Limites conservadores por período — cobrem até os SDRs mais ativos
+    // Erica: ~90 calls/dia × 180 dias = ~16200 → usamos 5000 (30 dias × 90 × buffer)
+    // Para 6 meses seria ideal mais, mas 5000 é confiável e rápido
+    const CALLS_LIMIT = 5000;   // cobre ~55 dias para Erica (90/dia)
+    const PROSP_LIMIT = 3000;
+    const ACTS_LIMIT  = 5000;
 
-    // Sync incremental: 1ª vez busca tudo desde 6 meses, depois só o delta
     for (const sdr of sdrs) {
       const name = sdr.name || sdr.email;
       try {
-        const calls = await syncEndpoint('/calls', { user_id: sdr.id }, cutoff6m);
+        const calls = await fetchRecent('/calls', { user_id: sdr.id }, CALLS_LIMIT);
         cache[`calls_${sdr.id}`] = calls; cacheTime[`calls_${sdr.id}`] = Date.now();
-      } catch (e) { console.error(`[${label}] calls FAILED ${name}:`, e.message); }
+      } catch (e) { console.error(`[${label}] calls ${name}:`, e.message); }
       try {
-        const prosp = await syncEndpoint('/prospections', { user_id: sdr.id }, cutoff6m);
+        const prosp = await fetchRecent('/prospections', { user_id: sdr.id }, PROSP_LIMIT);
         cache[`prosp_${sdr.id}`] = prosp; cacheTime[`prosp_${sdr.id}`] = Date.now();
-      } catch (e) { console.error(`[${label}] prosp FAILED ${name}:`, e.message); }
+      } catch (e) { console.error(`[${label}] prosp ${name}:`, e.message); }
       try {
-        const acts = await syncEndpoint('/prospections/activities', { assigned_to_id: sdr.id }, cutoff6m);
+        const acts = await fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, ACTS_LIMIT);
         cache[`acts_${sdr.id}`] = acts; cacheTime[`acts_${sdr.id}`] = Date.now();
-      } catch (e) { console.error(`[${label}] acts FAILED ${name}:`, e.message); }
-      console.log(`  [${label}] ${name}: calls=${cache[`calls_${sdr.id}`]?.length||0} prosp=${cache[`prosp_${sdr.id}`]?.length||0} acts=${cache[`acts_${sdr.id}`]?.length||0}`);
-      await sleep(400);
+      } catch (e) { console.error(`[${label}] acts ${name}:`, e.message); }
+      console.log(`  ${name}: calls=${cache[`calls_${sdr.id}`]?.length||0} prosp=${cache[`prosp_${sdr.id}`]?.length||0} acts=${cache[`acts_${sdr.id}`]?.length||0}`);
+      await sleep(500);
     }
 
-    // Pré-computa resultados agregados para os períodos mais comuns
-    // Isso garante que a 1ª requisição HTTP seja instantânea
+    // Pre-compute dashboard results for common periods
+    const now = new Date();
     for (const months of [1, 3, 6]) {
-      try {
-        const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - months);
-        const fCalls = []; const fProsp = []; const fActs = [];
-        const sdrMetrics = {};
-        for (const sdr of sdrs) {
-          const id = sdr.id; const name = sdr.name || sdr.email;
-          const calls  = (cache[`calls_${id}`]  || []).filter(c => new Date(c.date) >= cutoff);
-          const prosp   = (cache[`prosp_${id}`]  || []).filter(p => new Date(p.created_date) >= cutoff);
-          const actDate = a => a.execution_date || a.available_from || a.updated;
-          const acts    = (cache[`acts_${id}`]   || []).filter(a => new Date(actDate(a)) >= cutoff);
-          fCalls.push(...calls.map(c=>({...c,sdr_id:id,sdr_name:name})));
-          fProsp.push(...prosp.map(p=>({...p,sdr_id:id,sdr_name:name})));
-          fActs.push(...acts.map(a=>({...a,sdr_id:id,sdr_name:name})));
-          const conn = calls.filter(c=>c.status==='CONNECTED');
-          const mean = calls.filter(c=>c.output==='MEANINGFUL');
-          const dur  = conn.reduce((s,c)=>s+(c.connected_duration_seconds||0),0);
-          const won  = prosp.filter(p=>p.status==='WON');
-          const lost = prosp.filter(p=>p.status==='LOST');
-          const active = prosp.filter(p=>p.status==='EXECUTING'||p.status==='WAITING');
-          const short  = conn.filter(c=>(c.connected_duration_seconds||0)<=10);
-          const emails = acts.filter(a=>a.type==='E_MAIL');
-          const done   = acts.filter(a=>a.status==='FINISHED');
-          sdrMetrics[id] = {
-            id, name, team: sdr.team_name,
-            calls: { total:calls.length, connected:conn.length, meaningful:mean.length, shortAbandons:short.length,
-              connectionRate: calls.length?+((conn.length/calls.length)*100).toFixed(1):0,
-              meaningfulRate: conn.length?+((mean.length/conn.length)*100).toFixed(1):0,
-              shortAbandonRate: conn.length?+((short.length/conn.length)*100).toFixed(1):0,
-              avgDuration: conn.length?Math.round(dur/conn.length):0, totalDuration:dur },
-            prospections: { total:prosp.length, converted:won.length, lost:lost.length, active:active.length,
-              conversionRate: prosp.length?+((won.length/prosp.length)*100).toFixed(1):0 },
-            activities: { total:acts.length, done:done.length,
-              emails:emails.length, emailsDone:emails.filter(a=>a.status==='FINISHED').length,
-              emailsPending:emails.filter(a=>a.status!=='FINISHED').length,
-              callsDone:acts.filter(a=>a.type==='CALL'&&a.status==='FINISHED').length,
-              callsPending:acts.filter(a=>a.type==='CALL'&&a.status!=='FINISHED').length,
-              whatsappDone:acts.filter(a=>a.type==='SOCIAL_POINT'&&a.status==='FINISHED').length,
-              whatsappPending:acts.filter(a=>a.type==='SOCIAL_POINT'&&a.status!=='FINISHED').length,
-              social:acts.filter(a=>a.type==='SOCIAL_POINT').length,
-              searches:acts.filter(a=>a.type==='SEARCH').length,
-              completionRate: acts.length?+((done.length/acts.length)*100).toFixed(1):0 }
-          };
-        }
-        const trends = buildMonthlyTrends(fCalls, fProsp, fActs, months);
-        const result = { sdrs: Object.values(sdrMetrics), trends, totalSDRs: sdrs.length };
-        cache[`dashboard_result_${months}`] = result; cacheTime[`dashboard_result_${months}`] = Date.now();
+      const cutoff = new Date(now); cutoff.setMonth(cutoff.getMonth() - months);
+      const result = buildDashboardResult(sdrs, cutoff, months);
+      cache[`dashboard_result_${months}`] = result; cacheTime[`dashboard_result_${months}`] = Date.now();
 
-        // Inbound
-        const inboundSDRs = sdrs.filter(s => s.team_name && s.team_name.toUpperCase().includes('INBOUND'));
-        const iSdrMetrics = {};
-        for (const sdr of inboundSDRs) {
-          const m = sdrMetrics[sdr.id];
-          if (m) iSdrMetrics[sdr.id] = { ...m,
-            prospections: { ...m.prospections, won:m.prospections.converted, wonRate:m.prospections.conversionRate, lostRate: m.prospections.total?+((m.prospections.lost/m.prospections.total)*100).toFixed(1):0 }
-          };
-        }
-        const iTrends = buildMonthlyTrends(
-          fCalls.filter(c=>inboundSDRs.some(s=>s.id===c.sdr_id)),
-          fProsp.filter(p=>inboundSDRs.some(s=>s.id===p.sdr_id)),
-          fActs.filter(a=>inboundSDRs.some(s=>s.id===a.sdr_id)), months);
-        cache[`inbound_result_${months}`] = { sdrs: Object.values(iSdrMetrics), trends: iTrends, teams:[...new Set(inboundSDRs.map(s=>s.team_name).filter(Boolean))] };
-        cacheTime[`inbound_result_${months}`] = Date.now();
-      } catch(e) { console.error(`[${label}] pré-cômputo ${months}m:`, e.message); }
+      const inboundSDRs = sdrs.filter(s => s.team_name?.toUpperCase().includes('INBOUND'));
+      const inboundResult = buildInboundResult(inboundSDRs, cutoff, months);
+      cache[`inbound_result_${months}`] = inboundResult; cacheTime[`inbound_result_${months}`] = Date.now();
     }
+
     saveCacheToDisk();
-    const mins = ((Date.now() - started) / 60000).toFixed(1);
-    console.log(`[${label}] Dados atualizados em ${mins}min — ${sdrs.length} SDRs`);
-  } catch (e) {
-    console.error(`[${label}] Erro:`, e.message);
-  } finally {
-    refreshing = false;
-  }
+    console.log(`[${label}] concluído em ${((Date.now()-t0)/60000).toFixed(1)}min`);
+  } catch (e) { console.error(`[${label}] erro:`, e.message); }
+  finally { refreshing = false; }
 }
 
-// Load cache immediately on startup
+// ─── METRICS BUILDERS ────────────────────────────────────────────────────────
+function buildSDRMetrics(sdr, cutoff) {
+  const id = sdr.id, name = sdr.name || sdr.email;
+  const calls = (cache[`calls_${id}`] || []).filter(c => new Date(getDate(c)) >= cutoff);
+  const prosp  = (cache[`prosp_${id}`] || []).filter(p => new Date(getDate(p)) >= cutoff);
+  const acts   = (cache[`acts_${id}`]  || []).filter(a => new Date(getDate(a)) >= cutoff);
+
+  const conn  = calls.filter(c => c.status === 'CONNECTED');
+  const mean  = calls.filter(c => c.output === 'MEANINGFUL');
+  const short = conn.filter(c => (c.connected_duration_seconds||0) <= 10);
+  const dur   = conn.reduce((s,c) => s+(c.connected_duration_seconds||0), 0);
+  const won   = prosp.filter(p => p.status === 'WON');
+  const lost  = prosp.filter(p => p.status === 'LOST');
+  const active= prosp.filter(p => p.status === 'EXECUTING' || p.status === 'WAITING');
+  const emails= acts.filter(a => a.type === 'E_MAIL');
+  const done  = acts.filter(a => a.status === 'FINISHED');
+
+  return {
+    id, name, team: sdr.team_name,
+    calls: {
+      total: calls.length, connected: conn.length, meaningful: mean.length,
+      shortAbandons: short.length,
+      connectionRate:   calls.length ? +((conn.length/calls.length)*100).toFixed(1) : 0,
+      meaningfulRate:   conn.length  ? +((mean.length/conn.length)*100).toFixed(1)  : 0,
+      shortAbandonRate: conn.length  ? +((short.length/conn.length)*100).toFixed(1) : 0,
+      avgDuration: conn.length ? Math.round(dur/conn.length) : 0, totalDuration: dur
+    },
+    prospections: {
+      total: prosp.length, converted: won.length, lost: lost.length, active: active.length,
+      won: won.length, wonRate: prosp.length ? +((won.length/prosp.length)*100).toFixed(1) : 0,
+      lostRate: prosp.length ? +((lost.length/prosp.length)*100).toFixed(1) : 0,
+      conversionRate: prosp.length ? +((won.length/prosp.length)*100).toFixed(1) : 0
+    },
+    activities: {
+      total: acts.length, done: done.length,
+      emails: emails.length,
+      emailsDone: emails.filter(a=>a.status==='FINISHED').length,
+      emailsPending: emails.filter(a=>a.status!=='FINISHED').length,
+      callsDone: acts.filter(a=>a.type==='CALL'&&a.status==='FINISHED').length,
+      callsPending: acts.filter(a=>a.type==='CALL'&&a.status!=='FINISHED').length,
+      whatsappDone: acts.filter(a=>a.type==='SOCIAL_POINT'&&a.status==='FINISHED').length,
+      whatsappPending: acts.filter(a=>a.type==='SOCIAL_POINT'&&a.status!=='FINISHED').length,
+      social: acts.filter(a=>a.type==='SOCIAL_POINT').length,
+      searches: acts.filter(a=>a.type==='SEARCH').length,
+      completionRate: acts.length ? +((done.length/acts.length)*100).toFixed(1) : 0
+    }
+  };
+}
+
+function buildMonthlyTrends(calls, prosp, acts, numMonths) {
+  const months = {};
+  const now = new Date();
+  for (let i = numMonths-1; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+    const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    months[key] = { month:key, calls:0, connected:0, meaningful:0, conversions:0, prospections:0, emails:0, social:0 };
+  }
+  for (const c of calls) {
+    const d = new Date(c.date); const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    if (months[key]) { months[key].calls++; if(c.status==='CONNECTED') months[key].connected++; if(c.output==='MEANINGFUL') months[key].meaningful++; }
+  }
+  for (const p of prosp) {
+    const d = new Date(p.created_date); const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    if (months[key]) { months[key].prospections++; if(p.status==='WON') months[key].conversions++; }
+  }
+  for (const a of acts) {
+    const dt = a.execution_date||a.available_from||a.updated; if(!dt) continue;
+    const d = new Date(dt); const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    if (months[key] && a.status==='FINISHED') { if(a.type==='E_MAIL') months[key].emails++; if(a.type==='SOCIAL_POINT') months[key].social++; }
+  }
+  return Object.values(months);
+}
+
+function buildDashboardResult(sdrs, cutoff, months) {
+  const allCalls=[],allProsp=[],allActs=[];
+  const sdrMetrics = {};
+  for (const sdr of sdrs) {
+    const m = buildSDRMetrics(sdr, cutoff);
+    sdrMetrics[sdr.id] = m;
+    allCalls.push(...(cache[`calls_${sdr.id}`]||[]).filter(c=>new Date(getDate(c))>=cutoff).map(c=>({...c,sdr_id:sdr.id})));
+    allProsp.push(...(cache[`prosp_${sdr.id}`]||[]).filter(p=>new Date(getDate(p))>=cutoff).map(p=>({...p,sdr_id:sdr.id})));
+    allActs.push(...(cache[`acts_${sdr.id}`]||[]).filter(a=>new Date(getDate(a))>=cutoff).map(a=>({...a,sdr_id:sdr.id})));
+  }
+  return { sdrs: Object.values(sdrMetrics), trends: buildMonthlyTrends(allCalls,allProsp,allActs,months), totalSDRs: sdrs.length };
+}
+
+function buildInboundResult(inboundSDRs, cutoff, months) {
+  const allCalls=[],allProsp=[],allActs=[];
+  const sdrMetrics = {};
+  for (const sdr of inboundSDRs) {
+    const m = buildSDRMetrics(sdr, cutoff);
+    sdrMetrics[sdr.id] = m;
+    allCalls.push(...(cache[`calls_${sdr.id}`]||[]).filter(c=>new Date(getDate(c))>=cutoff));
+    allProsp.push(...(cache[`prosp_${sdr.id}`]||[]).filter(p=>new Date(getDate(p))>=cutoff));
+    allActs.push(...(cache[`acts_${sdr.id}`]||[]).filter(a=>new Date(getDate(a))>=cutoff));
+  }
+  return { sdrs: Object.values(sdrMetrics), trends: buildMonthlyTrends(allCalls,allProsp,allActs,months), teams:[...new Set(inboundSDRs.map(s=>s.team_name).filter(Boolean))] };
+}
+
+// ─── ROUTES ──────────────────────────────────────────────────────────────────
+
+app.get('/api/users', async (req, res) => {
+  try {
+    if (!cache['users']) { const {data} = await meetime.get('/users'); cache['users'] = data.data.filter(u=>u.email&&u.email.includes('v4company')); cacheTime['users']=Date.now(); }
+    res.json(cache['users']);
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
+app.get('/api/calls', async (req, res) => {
+  try {
+    const { user_id, months=3 } = req.query;
+    const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth()-parseInt(months));
+    const calls = cache[`calls_${user_id}`] || [];
+    res.json(calls.filter(c => new Date(c.date||0) >= cutoff));
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
+app.get('/api/dashboard', async (req, res) => {
+  try {
+    const { months=3 } = req.query;
+    const resultKey = `dashboard_result_${months}`;
+    // Serve cached result immediately — never block
+    if (cache[resultKey]) {
+      res.json(cache[resultKey]);
+      // Background refresh if stale
+      if (Date.now() - (cacheTime[resultKey]||0) > CACHE_TTL && !refreshing) {
+        refreshAllSDRs('background').catch(console.error);
+      }
+      return;
+    }
+    // No cache yet — compute on-the-fly from whatever data we have
+    const usersData = cache['users'] || [];
+    const sdrs = usersData.filter(u => u.role==='SALESMAN' && u.active);
+    if (!sdrs.length) { res.json({sdrs:[],trends:[],totalSDRs:0}); return; }
+    const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth()-parseInt(months));
+    const result = buildDashboardResult(sdrs, cutoff, parseInt(months));
+    cache[resultKey] = result; cacheTime[resultKey] = Date.now();
+    res.json(result);
+  } catch(e) { console.error(e); res.status(500).json({error:e.message}); }
+});
+
+app.get('/api/inbound', async (req, res) => {
+  try {
+    const { months=3 } = req.query;
+    const resultKey = `inbound_result_${months}`;
+    if (cache[resultKey]) {
+      res.json(cache[resultKey]);
+      if (Date.now() - (cacheTime[resultKey]||0) > CACHE_TTL && !refreshing) {
+        refreshAllSDRs('background').catch(console.error);
+      }
+      return;
+    }
+    const usersData = cache['users'] || [];
+    const inboundSDRs = usersData.filter(u => u.role==='SALESMAN' && u.active && u.team_name?.toUpperCase().includes('INBOUND'));
+    if (!inboundSDRs.length) { res.json({sdrs:[],trends:[],teams:[]}); return; }
+    const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth()-parseInt(months));
+    const result = buildInboundResult(inboundSDRs, cutoff, parseInt(months));
+    cache[resultKey] = result; cacheTime[resultKey] = Date.now();
+    res.json(result);
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
+app.get('/api/cadences', async (req, res) => {
+  try {
+    if (!cache['cadences']) { const {data} = await meetime.get('/cadences'); cache['cadences']=data.data; cacheTime['cadences']=Date.now(); }
+    res.json(cache['cadences']);
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
+app.get('/api/cache-status', (req, res) => {
+  const usersData = cache['users'] || [];
+  const sdrs = usersData.filter(u => u.role==='SALESMAN' && u.active);
+  const status = sdrs.map(s => ({
+    id: s.id, name: s.name||s.email,
+    calls: !!(cache[`calls_${s.id}`]?.length),
+    prosp: cache[`prosp_${s.id}`] !== undefined,
+    acts:  !!(cache[`acts_${s.id}`]?.length)
+  }));
+  res.json({ ready: status.filter(s=>s.calls&&s.prosp&&s.acts).length, total: status.length, sdrs: status, refreshing });
+});
+
+// ─── STARTUP ─────────────────────────────────────────────────────────────────
 loadCacheFromDisk();
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
-  console.log(`Dashboard running at http://localhost:${PORT}`);
-
-  // 1ª carga: após 1s do início
-  setTimeout(() => refreshAllSDRs('pre-warm'), 1000);
-
-  // Auto-refresh a cada 15 minutos — dados sempre atualizados independente de acessos
+  console.log(`Dashboard rodando em http://localhost:${PORT}`);
+  // Background refresh — never blocks startup
+  setTimeout(() => refreshAllSDRs('startup'), 1000);
   setInterval(() => refreshAllSDRs('auto-refresh'), CACHE_TTL);
 });
