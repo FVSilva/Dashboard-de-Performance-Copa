@@ -103,28 +103,31 @@ async function refreshAllSDRs(label = 'refresh') {
       const phaseT = Date.now();
       console.log(`[${label}] fase ${phase.label}...`);
 
-      for (const sdr of sdrs) {
-        const name = sdr.name || sdr.email;
-        // Só busca se ainda não temos dados suficientes para esta fase
-        if ((cache[`calls_${sdr.id}`]?.length||0) < phase.calls) {
-          try {
-            cache[`calls_${sdr.id}`] = await fetchRecent('/calls', { user_id: sdr.id }, phase.calls);
-            cacheTime[`calls_${sdr.id}`] = Date.now();
-          } catch(e) { console.error(`[${phase.label}] calls ${name}:`, e.message); }
-        }
-        if ((cache[`prosp_${sdr.id}`]?.length||0) < phase.prosp) {
-          try {
-            cache[`prosp_${sdr.id}`] = await fetchRecent('/prospections', { user_id: sdr.id }, phase.prosp);
-            cacheTime[`prosp_${sdr.id}`] = Date.now();
-          } catch(e) { console.error(`[${phase.label}] prosp ${name}:`, e.message); }
-        }
-        if ((cache[`acts_${sdr.id}`]?.length||0) < phase.acts) {
-          try {
-            cache[`acts_${sdr.id}`] = await fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, phase.acts);
-            cacheTime[`acts_${sdr.id}`] = Date.now();
-          } catch(e) { console.error(`[${phase.label}] acts ${name}:`, e.message); }
-        }
-        await sleep(300);
+      // Processa 2 SDRs em paralelo, cada um busca calls+prosp+acts simultaneamente
+      for (let i = 0; i < sdrs.length; i += 2) {
+        const batch = sdrs.slice(i, i + 2);
+        await Promise.all(batch.map(async sdr => {
+          const name = sdr.name || sdr.email;
+          await Promise.all([
+            // Calls, prosp e atividades em paralelo por SDR
+            (cache[`calls_${sdr.id}`]?.length||0) < phase.calls
+              ? fetchRecent('/calls', { user_id: sdr.id }, phase.calls)
+                  .then(d => { cache[`calls_${sdr.id}`] = d; cacheTime[`calls_${sdr.id}`] = Date.now(); })
+                  .catch(e => console.error(`[${phase.label}] calls ${name}:`, e.message))
+              : Promise.resolve(),
+            (cache[`prosp_${sdr.id}`]?.length||0) < phase.prosp
+              ? fetchRecent('/prospections', { user_id: sdr.id }, phase.prosp)
+                  .then(d => { cache[`prosp_${sdr.id}`] = d; cacheTime[`prosp_${sdr.id}`] = Date.now(); })
+                  .catch(e => console.error(`[${phase.label}] prosp ${name}:`, e.message))
+              : Promise.resolve(),
+            (cache[`acts_${sdr.id}`]?.length||0) < phase.acts
+              ? fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, phase.acts)
+                  .then(d => { cache[`acts_${sdr.id}`] = d; cacheTime[`acts_${sdr.id}`] = Date.now(); })
+                  .catch(e => console.error(`[${phase.label}] acts ${name}:`, e.message))
+              : Promise.resolve(),
+          ]);
+        }));
+        await sleep(500); // pausa entre lotes para não sobrecarregar a API
       }
 
       // Pré-computa e publica resultados desta fase imediatamente
