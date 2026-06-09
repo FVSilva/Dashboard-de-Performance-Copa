@@ -859,8 +859,13 @@ async function loadDashboard() {
     renderAll();
     document.getElementById('last-update').textContent =
       'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
+    // Mostra indicador se ainda há fases de histórico carregando
+    const cacheStatus = await fetch('/api/cache-status').then(r=>r.json()).catch(()=>null);
+    const stillLoading = cacheStatus?.refreshing;
     document.getElementById('refresh-badge').textContent =
-      `${dashData.sdrs.length} SDRs Outbound • ${(inboundData.sdrs||[]).length} Inbound • ${allCallsData.length.toLocaleString()} ligações`;
+      `${dashData.sdrs.length} SDRs • ${(inboundData.sdrs||[]).length} Inbound${stillLoading ? ' • ⏳ carregando histórico...' : ' • ✓ dados completos'}`;
+    // Auto-atualiza a cada 30s enquanto ainda carrega histórico
+    if (stillLoading) setTimeout(() => loadDashboard(), 30000);
   } catch(e) {
     console.error('loadDashboard error:', e);
   } finally {

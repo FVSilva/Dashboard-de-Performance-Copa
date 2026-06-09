@@ -75,7 +75,16 @@ async function fetchRecent(endpoint, params, maxRecords) {
 
 function getDate(r) { return r.date || r.created_date || r.execution_date || r.available_from || r.updated; }
 
-// ─── SDR DATA REFRESH ────────────────────────────────────────────────────────
+// ─── SDR DATA REFRESH — CARREGAMENTO PROGRESSIVO ─────────────────────────────
+// Fase 1 (~1-2 min): 30 dias → dashboard disponível imediatamente
+// Fase 2 (~3-4 min): 3 meses → histórico enriquecido em background
+// Fase 3 (~6-8 min): 6 meses → histórico completo em background
+const PHASES = [
+  { label: '30d', calls: 3000,  prosp: 2000, acts: 2000,  months: [1] },
+  { label: '3m',  calls: 9000,  prosp: 5000, acts: 6000,  months: [3] },
+  { label: '6m',  calls: 18000, prosp: 9000, acts: 12000, months: [6] },
+];
+
 let refreshing = false;
 
 async function refreshAllSDRs(label = 'refresh') {
@@ -88,45 +97,50 @@ async function refreshAllSDRs(label = 'refresh') {
     const allUsers = ud.data.filter(u => u.email && u.email.includes('v4company'));
     const sdrs = allUsers.filter(u => u.role === 'SALESMAN' && u.active).slice(0, 20);
     cache['users'] = allUsers; cacheTime['users'] = Date.now();
+    const inboundSDRs = sdrs.filter(s => s.team_name?.toUpperCase().includes('INBOUND'));
 
-    // 3000 = ~33 dias para Erica (90/dia) — suficiente para período padrão de 1 mês
-    // Startup rápido (~3-4 min) sem perder dados relevantes do mês atual
-    const CALLS_LIMIT = 3000;
-    const PROSP_LIMIT = 2000;
-    const ACTS_LIMIT  = 3000;
+    for (const phase of PHASES) {
+      const phaseT = Date.now();
+      console.log(`[${label}] fase ${phase.label}...`);
 
-    for (const sdr of sdrs) {
-      const name = sdr.name || sdr.email;
-      try {
-        const calls = await fetchRecent('/calls', { user_id: sdr.id }, CALLS_LIMIT);
-        cache[`calls_${sdr.id}`] = calls; cacheTime[`calls_${sdr.id}`] = Date.now();
-      } catch (e) { console.error(`[${label}] calls ${name}:`, e.message); }
-      try {
-        const prosp = await fetchRecent('/prospections', { user_id: sdr.id }, PROSP_LIMIT);
-        cache[`prosp_${sdr.id}`] = prosp; cacheTime[`prosp_${sdr.id}`] = Date.now();
-      } catch (e) { console.error(`[${label}] prosp ${name}:`, e.message); }
-      try {
-        const acts = await fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, ACTS_LIMIT);
-        cache[`acts_${sdr.id}`] = acts; cacheTime[`acts_${sdr.id}`] = Date.now();
-      } catch (e) { console.error(`[${label}] acts ${name}:`, e.message); }
-      console.log(`  ${name}: calls=${cache[`calls_${sdr.id}`]?.length||0} prosp=${cache[`prosp_${sdr.id}`]?.length||0} acts=${cache[`acts_${sdr.id}`]?.length||0}`);
-      await sleep(500);
+      for (const sdr of sdrs) {
+        const name = sdr.name || sdr.email;
+        // Só busca se ainda não temos dados suficientes para esta fase
+        if ((cache[`calls_${sdr.id}`]?.length||0) < phase.calls) {
+          try {
+            cache[`calls_${sdr.id}`] = await fetchRecent('/calls', { user_id: sdr.id }, phase.calls);
+            cacheTime[`calls_${sdr.id}`] = Date.now();
+          } catch(e) { console.error(`[${phase.label}] calls ${name}:`, e.message); }
+        }
+        if ((cache[`prosp_${sdr.id}`]?.length||0) < phase.prosp) {
+          try {
+            cache[`prosp_${sdr.id}`] = await fetchRecent('/prospections', { user_id: sdr.id }, phase.prosp);
+            cacheTime[`prosp_${sdr.id}`] = Date.now();
+          } catch(e) { console.error(`[${phase.label}] prosp ${name}:`, e.message); }
+        }
+        if ((cache[`acts_${sdr.id}`]?.length||0) < phase.acts) {
+          try {
+            cache[`acts_${sdr.id}`] = await fetchRecent('/prospections/activities', { assigned_to_id: sdr.id }, phase.acts);
+            cacheTime[`acts_${sdr.id}`] = Date.now();
+          } catch(e) { console.error(`[${phase.label}] acts ${name}:`, e.message); }
+        }
+        await sleep(300);
+      }
+
+      // Pré-computa e publica resultados desta fase imediatamente
+      const now = new Date();
+      for (const months of phase.months) {
+        const cutoff = new Date(now); cutoff.setMonth(cutoff.getMonth() - months);
+        cache[`dashboard_result_${months}`] = buildDashboardResult(sdrs, cutoff, months);
+        cacheTime[`dashboard_result_${months}`] = Date.now();
+        cache[`inbound_result_${months}`] = buildInboundResult(inboundSDRs, cutoff, months);
+        cacheTime[`inbound_result_${months}`] = Date.now();
+      }
+      saveCacheToDisk();
+      console.log(`[${label}] fase ${phase.label} em ${((Date.now()-phaseT)/60000).toFixed(1)}min — publicado`);
     }
 
-    // Pre-compute dashboard results for common periods
-    const now = new Date();
-    for (const months of [1, 3, 6]) {
-      const cutoff = new Date(now); cutoff.setMonth(cutoff.getMonth() - months);
-      const result = buildDashboardResult(sdrs, cutoff, months);
-      cache[`dashboard_result_${months}`] = result; cacheTime[`dashboard_result_${months}`] = Date.now();
-
-      const inboundSDRs = sdrs.filter(s => s.team_name?.toUpperCase().includes('INBOUND'));
-      const inboundResult = buildInboundResult(inboundSDRs, cutoff, months);
-      cache[`inbound_result_${months}`] = inboundResult; cacheTime[`inbound_result_${months}`] = Date.now();
-    }
-
-    saveCacheToDisk();
-    console.log(`[${label}] concluído em ${((Date.now()-t0)/60000).toFixed(1)}min`);
+    console.log(`[${label}] completo em ${((Date.now()-t0)/60000).toFixed(1)}min`);
   } catch (e) { console.error(`[${label}] erro:`, e.message); }
   finally { refreshing = false; }
 }
