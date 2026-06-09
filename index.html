@@ -913,7 +913,7 @@ function getFilteredSDRs() {
   let sdrs = dashData.sdrs;
   const sf = document.getElementById('filter-sdr').value;
   const tf = document.getElementById('filter-team').value;
-  if (sf !== 'all') sdrs = sdrs.filter(s => s.id === sf);
+  if (sf !== 'all') sdrs = sdrs.filter(s => String(s.id) === String(sf));
   if (tf !== 'all') sdrs = sdrs.filter(s => s.team === tf);
   return sdrs;
 }

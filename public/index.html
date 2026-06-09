@@ -863,26 +863,28 @@ async function loadDashboard() {
 }
 
 function getFilteredSDRs() {
-  let sdrs = dashData.sdrs;
+  if (!dashData) return [];
+  let sdrs = [...dashData.sdrs];
   const sf = document.getElementById('filter-sdr').value;
   const tf = document.getElementById('filter-team').value;
-  if (sf !== 'all') sdrs = sdrs.filter(s => s.id === sf);
+  if (sf !== 'all') sdrs = sdrs.filter(s => String(s.id) === String(sf));
   if (tf !== 'all') sdrs = sdrs.filter(s => s.team === tf);
   return sdrs;
 }
 
 function getFilteredCalls() {
+  if (!dashData) return [];
   const { from, to } = getDateRange();
-  let calls = allCallsData.filter(c => {
+  let calls = (allCallsData||[]).filter(c => {
     const d = new Date(c.date);
     return d >= from && d <= to;
   });
   const sf = document.getElementById('filter-sdr').value;
   const tf = document.getElementById('filter-team').value;
-  if (sf !== 'all') calls = calls.filter(c => c.user_id === sf);
+  if (sf !== 'all') calls = calls.filter(c => String(c.user_id) === String(sf));
   if (tf !== 'all') {
-    const ids = dashData.sdrs.filter(s=>s.team===tf).map(s=>s.id);
-    calls = calls.filter(c => ids.includes(c.user_id));
+    const ids = dashData.sdrs.filter(s=>s.team===tf).map(s=>String(s.id));
+    calls = calls.filter(c => ids.includes(String(c.user_id)));
   }
   return calls;
 }
@@ -913,6 +915,7 @@ function applyFilters() {
 }
 
 function renderAll() {
+  if (!dashData) return;
   renderOverview();
   renderFunnel();
   renderCalls();
@@ -1592,8 +1595,8 @@ initDates();
 loadDashboard();
 
 // Filtros SDR e Time aplicam instantaneamente sem clicar em Aplicar
-document.getElementById('filter-sdr').addEventListener('change', () => renderAll());
-document.getElementById('filter-team').addEventListener('change', () => renderAll());
+document.getElementById('filter-sdr').addEventListener('change', () => { if (dashData) renderAll(); });
+document.getElementById('filter-team').addEventListener('change', () => { if (dashData) renderAll(); });
 </script>
 </body>
 </html>
