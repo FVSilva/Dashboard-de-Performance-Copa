@@ -917,24 +917,30 @@ function populateFilters() {
 }
 
 function applyFilters() {
-  // Só recarrega da API se a data mudou — SDR/Time filtram localmente
   const curFrom = document.getElementById('filter-date-from').value;
   const curTo   = document.getElementById('filter-date-to').value;
-  if (curFrom !== loadedDateFrom || curTo !== loadedDateTo) {
+  const diffDays = curFrom && curTo ? Math.ceil((new Date(curTo) - new Date(curFrom)) / 86400000) + 1 : 99;
+  // Reload from API if dates changed OR if period is <= 7 days (cached monthly aggregates are not granular enough)
+  const needsReload = curFrom !== loadedDateFrom || curTo !== loadedDateTo || diffDays <= 7;
+  if (needsReload) {
     loadDashboard();
   } else {
     renderAll();
   }
 }
 
+function renderCurrentTab() {
+  if (currentTab === 'funnel') renderFunnel();
+  else if (currentTab === 'calls') renderCalls();
+  else if (currentTab === 'inbound') renderInbound();
+  else if (currentTab === 'comparison') renderComparison();
+  else if (currentTab === 'trends') renderTrends();
+}
+
 function renderAll() {
   if (!dashData) return;
   renderOverview();
-  renderFunnel();
-  renderCalls();
-  renderInbound();
-  renderComparison();
-  renderTrends();
+  renderCurrentTab();
 }
 
 /* ===================== OVERVIEW ===================== */
@@ -1485,6 +1491,13 @@ function renderInbound() {
 
 /* ===================== COMPARISON ===================== */
 function renderComparison() {
+  const sf = document.getElementById('filter-sdr').value;
+  if (sf !== 'all') {
+    document.getElementById('comparison-kpis').innerHTML = '<div class="no-data" style="padding:2rem;text-align:center;color:#888;">Comparativo mensal disponível apenas com "Todos os SDRs" selecionado.</div>';
+    if (charts['chart-comparison']) { charts['chart-comparison'].destroy(); delete charts['chart-comparison']; }
+    if (charts['chart-sdr-evolution']) { charts['chart-sdr-evolution'].destroy(); delete charts['chart-sdr-evolution']; }
+    return;
+  }
   const trends = dashData.trends;
   if (trends.length < 2) return;
 
@@ -1613,6 +1626,7 @@ function showTab(tab) {
     el.classList.toggle('active', ['overview','funnel','calls','inbound','comparison','trends'][i]===tab);
   });
   currentTab = tab;
+  if (dashData) renderCurrentTab();
 }
 
 // Init
