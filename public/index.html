@@ -828,9 +828,11 @@ async function pollCacheStatus() {
   } catch(_) {}
 }
 
-async function loadDashboard() {
-  document.getElementById('loading').style.display = 'flex';
-  document.getElementById('loading-sub').textContent = 'Conectando à API Meetime...';
+async function loadDashboard(silent = false) {
+  if (!silent) {
+    document.getElementById('loading').style.display = 'flex';
+    document.getElementById('loading-sub').textContent = 'Conectando à API Meetime...';
+  }
   document.getElementById('loading-bar').style.width = '5%';
 
   // Poll cache status while loading for live progress display
@@ -865,13 +867,15 @@ async function loadDashboard() {
     document.getElementById('refresh-badge').textContent =
       `${dashData.sdrs.length} SDRs • ${(inboundData.sdrs||[]).length} Inbound${stillLoading ? ' • ⏳ carregando histórico...' : ' • ✓ dados completos'}`;
     // Auto-atualiza a cada 30s enquanto ainda carrega histórico
-    if (stillLoading) setTimeout(() => loadDashboard(), 30000);
+    if (stillLoading) setTimeout(() => loadDashboard(true), 30000);
   } catch(e) {
     console.error('loadDashboard error:', e);
   } finally {
     clearInterval(statusInterval);
-    document.getElementById('loading-bar').style.width = '100%';
-    setTimeout(() => document.getElementById('loading').style.display = 'none', 300);
+    if (!silent) {
+      document.getElementById('loading-bar').style.width = '100%';
+      setTimeout(() => document.getElementById('loading').style.display = 'none', 300);
+    }
   }
 }
 
@@ -903,17 +907,25 @@ function getFilteredCalls() {
 }
 
 function populateFilters() {
-  const sdrSel = document.getElementById('filter-sdr');
+  const sdrSel  = document.getElementById('filter-sdr');
   const teamSel = document.getElementById('filter-team');
-  sdrSel.innerHTML = '<option value="all">Todos os SDRs</option>';
+  // Preserva seleção atual antes de reconstruir
+  const prevSdr  = sdrSel.value;
+  const prevTeam = teamSel.value;
+
+  sdrSel.innerHTML  = '<option value="all">Todos os SDRs</option>';
+  teamSel.innerHTML = '<option value="all">Todos os times</option>';
   const teams = new Set();
   const allForFilter = [...dashData.sdrs, ...(inboundData?.sdrs || [])];
   allForFilter.forEach(s => {
     sdrSel.innerHTML += `<option value="${s.id}">${s.name||s.id}</option>`;
     if (s.team) teams.add(s.team);
   });
-  teamSel.innerHTML = '<option value="all">Todos os times</option>';
   teams.forEach(t => { teamSel.innerHTML += `<option value="${t}">${t}</option>`; });
+
+  // Restaura seleção anterior
+  if (prevSdr  && sdrSel.querySelector(`option[value="${prevSdr}"]`))   sdrSel.value  = prevSdr;
+  if (prevTeam && teamSel.querySelector(`option[value="${prevTeam}"]`)) teamSel.value = prevTeam;
 }
 
 function applyFilters() {
@@ -1637,12 +1649,12 @@ loadDashboard();
 document.getElementById('filter-sdr').addEventListener('change', () => { if (dashData) renderAll(); });
 document.getElementById('filter-team').addEventListener('change', () => { if (dashData) renderAll(); });
 
-// Auto-refresh a cada 5 minutos — mantém horário atualizado automaticamente
+// Auto-refresh silencioso a cada 5 minutos — não mostra loading, preserva filtros
 setInterval(() => {
   const curFrom = document.getElementById('filter-date-from').value;
   const curTo   = document.getElementById('filter-date-to').value;
   const diffDays = curFrom && curTo ? Math.ceil((new Date(curTo) - new Date(curFrom)) / 86400000) + 1 : 99;
-  if (diffDays > 7) loadDashboard(); // não auto-atualiza em filtro de dia específico
+  if (diffDays > 7) loadDashboard(true); // silent=true: sem overlay, preserva seleção
 }, 5 * 60 * 1000);
 </script>
 </body>
