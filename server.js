@@ -89,12 +89,11 @@ async function refreshAllSDRs(label = 'refresh') {
     const sdrs = allUsers.filter(u => u.role === 'SALESMAN' && u.active).slice(0, 20);
     cache['users'] = allUsers; cacheTime['users'] = Date.now();
 
-    // Limites conservadores por período — cobrem até os SDRs mais ativos
-    // Erica: ~90 calls/dia × 180 dias = ~16200 → usamos 5000 (30 dias × 90 × buffer)
-    // Para 6 meses seria ideal mais, mas 5000 é confiável e rápido
-    const CALLS_LIMIT = 5000;   // cobre ~55 dias para Erica (90/dia)
-    const PROSP_LIMIT = 3000;
-    const ACTS_LIMIT  = 5000;
+    // 3000 = ~33 dias para Erica (90/dia) — suficiente para período padrão de 1 mês
+    // Startup rápido (~3-4 min) sem perder dados relevantes do mês atual
+    const CALLS_LIMIT = 3000;
+    const PROSP_LIMIT = 2000;
+    const ACTS_LIMIT  = 3000;
 
     for (const sdr of sdrs) {
       const name = sdr.name || sdr.email;
@@ -321,13 +320,26 @@ app.get('/api/cache-status', (req, res) => {
   res.json({ ready: status.filter(s=>s.calls&&s.prosp&&s.acts).length, total: status.length, sdrs: status, refreshing });
 });
 
+// Endpoint de ping — mantém o Render acordado
+app.get('/ping', (req, res) => res.send('ok'));
+
 // ─── STARTUP ─────────────────────────────────────────────────────────────────
 loadCacheFromDisk();
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Dashboard rodando em http://localhost:${PORT}`);
-  // Background refresh — never blocks startup
   setTimeout(() => refreshAllSDRs('startup'), 1000);
   setInterval(() => refreshAllSDRs('auto-refresh'), CACHE_TTL);
+
+  // Auto-ping a cada 9 minutos para o Render não dormir (dorme após 15 min sem requests)
+  const selfUrl = process.env.RENDER_EXTERNAL_URL;
+  if (selfUrl) {
+    console.log(`Keep-alive ativado: pingando ${selfUrl}/ping a cada 9min`);
+    setInterval(() => {
+      require('https').get(`${selfUrl}/ping`, r => {
+        console.log(`Keep-alive ping: ${r.statusCode}`);
+      }).on('error', e => console.error('Keep-alive erro:', e.message));
+    }, 9 * 60 * 1000);
+  }
 });
