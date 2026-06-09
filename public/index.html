@@ -1636,6 +1636,14 @@ loadDashboard();
 // Filtros SDR e Time aplicam instantaneamente sem clicar em Aplicar
 document.getElementById('filter-sdr').addEventListener('change', () => { if (dashData) renderAll(); });
 document.getElementById('filter-team').addEventListener('change', () => { if (dashData) renderAll(); });
+
+// Auto-refresh a cada 5 minutos — mantém horário atualizado automaticamente
+setInterval(() => {
+  const curFrom = document.getElementById('filter-date-from').value;
+  const curTo   = document.getElementById('filter-date-to').value;
+  const diffDays = curFrom && curTo ? Math.ceil((new Date(curTo) - new Date(curFrom)) / 86400000) + 1 : 99;
+  if (diffDays > 7) loadDashboard(); // não auto-atualiza em filtro de dia específico
+}, 5 * 60 * 1000);
 </script>
 </body>
 </html>
