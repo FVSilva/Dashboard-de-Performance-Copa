@@ -149,6 +149,47 @@ async function refreshAllSDRs(label = 'refresh') {
 }
 
 // ─── METRICS BUILDERS ────────────────────────────────────────────────────────
+function buildSDRMetricsFromData(sdr, calls, prosp, acts) {
+  const id = sdr.id, name = sdr.name || sdr.email;
+  const conn  = calls.filter(c => c.status === 'CONNECTED');
+  const mean  = calls.filter(c => c.output === 'MEANINGFUL');
+  const short = conn.filter(c => (c.connected_duration_seconds||0) <= 10);
+  const dur   = conn.reduce((s,c) => s+(c.connected_duration_seconds||0), 0);
+  const won   = prosp.filter(p => p.status === 'WON');
+  const lost  = prosp.filter(p => p.status === 'LOST');
+  const active= prosp.filter(p => p.status === 'EXECUTING' || p.status === 'WAITING');
+  const emails= acts.filter(a => a.type === 'E_MAIL');
+  const done  = acts.filter(a => a.status === 'FINISHED');
+  return {
+    id, name, team: sdr.team_name,
+    calls: {
+      total: calls.length, connected: conn.length, meaningful: mean.length, shortAbandons: short.length,
+      connectionRate:   calls.length ? +((conn.length/calls.length)*100).toFixed(1) : 0,
+      meaningfulRate:   conn.length  ? +((mean.length/conn.length)*100).toFixed(1)  : 0,
+      shortAbandonRate: conn.length  ? +((short.length/conn.length)*100).toFixed(1) : 0,
+      avgDuration: conn.length ? Math.round(dur/conn.length) : 0, totalDuration: dur
+    },
+    prospections: {
+      total: prosp.length, converted: won.length, lost: lost.length, active: active.length,
+      won: won.length, wonRate: prosp.length ? +((won.length/prosp.length)*100).toFixed(1) : 0,
+      lostRate: prosp.length ? +((lost.length/prosp.length)*100).toFixed(1) : 0,
+      conversionRate: prosp.length ? +((won.length/prosp.length)*100).toFixed(1) : 0
+    },
+    activities: {
+      total: acts.length, done: done.length, emails: emails.length,
+      emailsDone: emails.filter(a=>a.status==='FINISHED').length,
+      emailsPending: emails.filter(a=>a.status!=='FINISHED').length,
+      callsDone: acts.filter(a=>a.type==='CALL'&&a.status==='FINISHED').length,
+      callsPending: acts.filter(a=>a.type==='CALL'&&a.status!=='FINISHED').length,
+      whatsappDone: acts.filter(a=>a.type==='SOCIAL_POINT'&&a.status==='FINISHED').length,
+      whatsappPending: acts.filter(a=>a.type==='SOCIAL_POINT'&&a.status!=='FINISHED').length,
+      social: acts.filter(a=>a.type==='SOCIAL_POINT').length,
+      searches: acts.filter(a=>a.type==='SEARCH').length,
+      completionRate: acts.length ? +((done.length/acts.length)*100).toFixed(1) : 0
+    }
+  };
+}
+
 function buildSDRMetrics(sdr, cutoff) {
   const id = sdr.id, name = sdr.name || sdr.email;
   const calls = (cache[`calls_${id}`] || []).filter(c => new Date(getDate(c)) >= cutoff);
@@ -221,28 +262,40 @@ function buildMonthlyTrends(calls, prosp, acts, numMonths) {
   return Object.values(months);
 }
 
-function buildDashboardResult(sdrs, cutoff, months) {
+function buildDashboardResult(sdrs, cutoff, months, dateTo = null) {
+  const inRange = (r) => {
+    const d = new Date(getDate(r));
+    return d >= cutoff && (!dateTo || d <= dateTo);
+  };
   const allCalls=[],allProsp=[],allActs=[];
   const sdrMetrics = {};
   for (const sdr of sdrs) {
-    const m = buildSDRMetrics(sdr, cutoff);
-    sdrMetrics[sdr.id] = m;
-    allCalls.push(...(cache[`calls_${sdr.id}`]||[]).filter(c=>new Date(getDate(c))>=cutoff).map(c=>({...c,sdr_id:sdr.id})));
-    allProsp.push(...(cache[`prosp_${sdr.id}`]||[]).filter(p=>new Date(getDate(p))>=cutoff).map(p=>({...p,sdr_id:sdr.id})));
-    allActs.push(...(cache[`acts_${sdr.id}`]||[]).filter(a=>new Date(getDate(a))>=cutoff).map(a=>({...a,sdr_id:sdr.id})));
+    const id = sdr.id;
+    const calls = (cache[`calls_${id}`]||[]).filter(inRange);
+    const prosp  = (cache[`prosp_${id}`]||[]).filter(inRange);
+    const acts   = (cache[`acts_${id}`]||[]).filter(inRange);
+    // Passa os dados já filtrados para buildSDRMetrics via cache temporário
+    const tmpKey = `_tmp_${id}`;
+    cache[tmpKey+'_c'] = calls; cache[tmpKey+'_p'] = prosp; cache[tmpKey+'_a'] = acts;
+    sdrMetrics[id] = buildSDRMetricsFromData(sdr, calls, prosp, acts);
+    delete cache[tmpKey+'_c']; delete cache[tmpKey+'_p']; delete cache[tmpKey+'_a'];
+    allCalls.push(...calls.map(c=>({...c,sdr_id:id})));
+    allProsp.push(...prosp.map(p=>({...p,sdr_id:id})));
+    allActs.push(...acts.map(a=>({...a,sdr_id:id})));
   }
   return { sdrs: Object.values(sdrMetrics), trends: buildMonthlyTrends(allCalls,allProsp,allActs,months), totalSDRs: sdrs.length };
 }
 
-function buildInboundResult(inboundSDRs, cutoff, months) {
+function buildInboundResult(inboundSDRs, cutoff, months, dateTo = null) {
+  const inRange = (r) => { const d = new Date(getDate(r)); return d >= cutoff && (!dateTo || d <= dateTo); };
   const allCalls=[],allProsp=[],allActs=[];
   const sdrMetrics = {};
   for (const sdr of inboundSDRs) {
-    const m = buildSDRMetrics(sdr, cutoff);
-    sdrMetrics[sdr.id] = m;
-    allCalls.push(...(cache[`calls_${sdr.id}`]||[]).filter(c=>new Date(getDate(c))>=cutoff));
-    allProsp.push(...(cache[`prosp_${sdr.id}`]||[]).filter(p=>new Date(getDate(p))>=cutoff));
-    allActs.push(...(cache[`acts_${sdr.id}`]||[]).filter(a=>new Date(getDate(a))>=cutoff));
+    const calls = (cache[`calls_${sdr.id}`]||[]).filter(inRange);
+    const prosp  = (cache[`prosp_${sdr.id}`]||[]).filter(inRange);
+    const acts   = (cache[`acts_${sdr.id}`]||[]).filter(inRange);
+    sdrMetrics[sdr.id] = buildSDRMetricsFromData(sdr, calls, prosp, acts);
+    allCalls.push(...calls); allProsp.push(...prosp); allActs.push(...acts);
   }
   return { sdrs: Object.values(sdrMetrics), trends: buildMonthlyTrends(allCalls,allProsp,allActs,months), teams:[...new Set(inboundSDRs.map(s=>s.team_name).filter(Boolean))] };
 }
@@ -275,21 +328,28 @@ app.get('/api/calls', async (req, res) => {
 
 app.get('/api/dashboard', async (req, res) => {
   try {
-    const { months=3 } = req.query;
-    const resultKey = `dashboard_result_${months}`;
-    // Serve cached result immediately — never block
-    if (cache[resultKey]) {
-      res.json(cache[resultKey]);
-      // Background refresh if stale
-      if (Date.now() - (cacheTime[resultKey]||0) > CACHE_TTL && !refreshing) {
-        refreshAllSDRs('background').catch(console.error);
-      }
-      return;
-    }
-    // No cache yet — compute on-the-fly from whatever data we have
+    const { months=3, date_from, date_to } = req.query;
     const usersData = cache['users'] || [];
     const sdrs = usersData.filter(u => u.role==='SALESMAN' && u.active);
     if (!sdrs.length) { res.json({sdrs:[],trends:[],totalSDRs:0}); return; }
+
+    // Período customizado (ex: "hoje", "últimos 7 dias") — calcula do dado bruto em cache
+    if (date_from && date_to) {
+      const from = new Date(date_from + 'T00:00:00');
+      const to   = new Date(date_to   + 'T23:59:59');
+      const diffDays = Math.ceil((to - from) / 86400000) + 1;
+      const result = buildDashboardResult(sdrs, from, Math.max(1, diffDays), to);
+      return res.json(result);
+    }
+
+    // Períodos padrão (1m, 3m, 6m) — usa cache pré-computado
+    const resultKey = `dashboard_result_${months}`;
+    if (cache[resultKey]) {
+      res.json(cache[resultKey]);
+      if (Date.now() - (cacheTime[resultKey]||0) > CACHE_TTL && !refreshing)
+        refreshAllSDRs('background').catch(console.error);
+      return;
+    }
     const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth()-parseInt(months));
     const result = buildDashboardResult(sdrs, cutoff, parseInt(months));
     cache[resultKey] = result; cacheTime[resultKey] = Date.now();
@@ -299,18 +359,25 @@ app.get('/api/dashboard', async (req, res) => {
 
 app.get('/api/inbound', async (req, res) => {
   try {
-    const { months=3 } = req.query;
-    const resultKey = `inbound_result_${months}`;
-    if (cache[resultKey]) {
-      res.json(cache[resultKey]);
-      if (Date.now() - (cacheTime[resultKey]||0) > CACHE_TTL && !refreshing) {
-        refreshAllSDRs('background').catch(console.error);
-      }
-      return;
-    }
+    const { months=3, date_from, date_to } = req.query;
     const usersData = cache['users'] || [];
     const inboundSDRs = usersData.filter(u => u.role==='SALESMAN' && u.active && u.team_name?.toUpperCase().includes('INBOUND'));
     if (!inboundSDRs.length) { res.json({sdrs:[],trends:[],teams:[]}); return; }
+
+    if (date_from && date_to) {
+      const from = new Date(date_from + 'T00:00:00');
+      const to   = new Date(date_to   + 'T23:59:59');
+      const diffDays = Math.ceil((to - from) / 86400000) + 1;
+      return res.json(buildInboundResult(inboundSDRs, from, Math.max(1, diffDays), to));
+    }
+
+    const resultKey = `inbound_result_${months}`;
+    if (cache[resultKey]) {
+      res.json(cache[resultKey]);
+      if (Date.now() - (cacheTime[resultKey]||0) > CACHE_TTL && !refreshing)
+        refreshAllSDRs('background').catch(console.error);
+      return;
+    }
     const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth()-parseInt(months));
     const result = buildInboundResult(inboundSDRs, cutoff, parseInt(months));
     cache[resultKey] = result; cacheTime[resultKey] = Date.now();
