@@ -9,6 +9,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@upstash/redis": "^1.38.0",
     "axios": "^1.17.0",
     "cors": "^2.8.6",
     "express": "^5.2.1"

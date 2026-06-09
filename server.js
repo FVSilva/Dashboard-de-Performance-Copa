@@ -17,12 +17,52 @@ const CACHE_TTL  = 15 * 60 * 1000; // 15 min
 const meetime = axios.create({ baseURL: BASE_URL, headers: { Authorization: API_KEY } });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// ─── UPSTASH REDIS (cache externo — sobrevive a restarts/deploys) ─────────────
+let redis = null;
+if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
+  const { Redis } = require('@upstash/redis');
+  redis = new Redis({
+    url:   process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN,
+  });
+  console.log('Redis conectado:', process.env.UPSTASH_REDIS_REST_URL);
+}
+
+async function redisSave() {
+  if (!redis) return;
+  try {
+    // Salva só as chaves essenciais (dados brutos por SDR)
+    const keys = Object.keys(cache).filter(k =>
+      k.startsWith('calls_') || k.startsWith('prosp_') || k.startsWith('acts_') || k === 'users'
+    );
+    const snapshot = {};
+    keys.forEach(k => { snapshot[k] = cache[k]; });
+    await redis.set('dashboard_cache', JSON.stringify({ cache: snapshot, cacheTime, savedAt: Date.now() }), { ex: 3600 }); // TTL 1h
+    console.log(`Redis: ${keys.length} chaves salvas`);
+  } catch(e) { console.error('Redis save error:', e.message); }
+}
+
+async function redisLoad() {
+  if (!redis) return;
+  try {
+    const data = await redis.get('dashboard_cache');
+    if (!data) { console.log('Redis: sem dados salvos'); return; }
+    const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+    const { cache: c, cacheTime: ct, savedAt } = parsed;
+    const ageMin = Math.round((Date.now() - savedAt) / 60000);
+    Object.assign(cache, c);
+    Object.assign(cacheTime, ct);
+    console.log(`Redis: cache restaurado (${Object.keys(c).length} chaves, ${ageMin}min atrás)`);
+  } catch(e) { console.error('Redis load error:', e.message); }
+}
+
 // ─── IN-MEMORY CACHE ─────────────────────────────────────────────────────────
 let cache = {}, cacheTime = {};
 
 function saveCacheToDisk() {
   try { fs.writeFileSync(CACHE_FILE, JSON.stringify({ cache, cacheTime, savedAt: Date.now() })); }
   catch (e) { console.error('Cache save error:', e.message); }
+  redisSave(); // salva no Redis também (async, não bloqueia)
 }
 
 function loadCacheFromDisk() {
@@ -408,12 +448,17 @@ app.get('/api/cache-status', (req, res) => {
 app.get('/ping', (req, res) => res.send('ok'));
 
 // ─── STARTUP ─────────────────────────────────────────────────────────────────
-loadCacheFromDisk();
+loadCacheFromDisk(); // carrega do disco local (desenvolvimento)
+// Redis carregado de forma assíncrona antes do primeiro refresh
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Dashboard rodando em http://localhost:${PORT}`);
-  setTimeout(() => refreshAllSDRs('startup'), 1000);
+  // Carrega Redis primeiro, depois inicia o refresh
+  setTimeout(async () => {
+    await redisLoad(); // restaura cache do Redis se disponível
+    refreshAllSDRs('startup');
+  }, 1000);
   setInterval(() => refreshAllSDRs('auto-refresh'), CACHE_TTL);
 
   // Auto-ping a cada 9 minutos para o Render não dormir (dorme após 15 min sem requests)
