@@ -739,6 +739,14 @@ function renderChart(id, config) {
   const isPie = type === 'pie' || type === 'doughnut';
   const isLine = type === 'line';
 
+  // Add top padding for vertical bar/line charts so datalabels don't get clipped
+  if ((type === 'bar' || isLine) && !isHorizontal && !isPie) {
+    if (!config.options) config.options = {};
+    if (!config.options.layout) config.options.layout = {};
+    if (!config.options.layout.padding) config.options.layout.padding = {};
+    config.options.layout.padding.top = config.options.layout.padding.top || 25;
+  }
+
   // Inject datalabels plugin config into each dataset that doesn't already have one
   if (config.data?.datasets) {
     config.data.datasets.forEach(ds => {
@@ -1199,7 +1207,7 @@ function selectFunnelSDR(id) {
 }
 
 function renderFunnelFor(id) {
-  const sdr = dashData.sdrs.find(s=>s.id===id);
+  const sdr = getFilteredSDRs().find(s=>s.id===id) || dashData.sdrs.find(s=>s.id===id);
   if (!sdr) return;
   document.getElementById('funnel-sdr-name').textContent = sdr.name||sdr.id;
 
@@ -1312,7 +1320,19 @@ function renderCalls() {
 /* ===================== INBOUND ===================== */
 function renderInbound() {
   if (!inboundData || !Array.isArray(inboundData.sdrs) || !inboundData.sdrs.length) return;
-  const sdrs = inboundData.sdrs;
+  // Apply SDR and team filters to inbound data
+  const sf = document.getElementById('filter-sdr').value;
+  const tf = document.getElementById('filter-team').value;
+  let sdrs = inboundData.sdrs;
+  if (sf !== 'all') sdrs = sdrs.filter(s => String(s.id) === String(sf));
+  if (tf !== 'all') sdrs = sdrs.filter(s => s.team === tf);
+  if (!sdrs.length) {
+    document.getElementById('inbound-kpis').innerHTML = '<div class="no-data" style="grid-column:1/-1">Nenhum SDR Inbound no filtro selecionado.</div>';
+    ['ib-chart-calls','ib-chart-channels','ib-chart-conn-rate','ib-chart-won-lost'].forEach(id => { if (charts[id]) { charts[id].destroy(); delete charts[id]; } });
+    document.getElementById('ib-funnel').innerHTML = '';
+    document.getElementById('inbound-tbody').innerHTML = '<tr><td colspan="18" class="no-data">Nenhum dado.</td></tr>';
+    return;
+  }
 
   const totCalls   = sdrs.reduce((s,r)=>s+r.calls.total,0);
   const totConn    = sdrs.reduce((s,r)=>s+r.calls.connected,0);
